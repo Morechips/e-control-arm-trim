@@ -1,8 +1,10 @@
 # 第一次关联GitHub并推送：当前v4.5
 
-**用户已恢复首次上传，先保存当前 v4.5 软件基线。抓人质姿态待重录、实车验证待完成；上传源码不代表完成验收。暂不创建“完整抓取验收”发布。重录后重新构建、更新固件哈希和版本说明。**
+**首次源码上传已完成。** 2026-10-02，本地首个提交 `b4664dd` 已推送到 `https://github.com/Morechips/e-control-arm-trim.git`，main 跟踪 origin/main，远端提交已核对一致。抓人质姿态待重录、实车验证待完成；上传源码不代表完成验收，没有创建 GitHub Release。
 
-已准备目录：`D:\工科大\e-control-arm-trim-github`。此目录已初始化 Git，分支 main；执行首次上传前先用 status/log/remote 确认进度，不要重复 init 或 remote add。源码与测试副本对应，上传忽略规则已准备。当前可运行测试目录与原团队Git仓库保留。
+下面保留首次关联的学习流程；这个仓库已经完成 init/add/commit/remote/push，不能直接整块重跑。以后修改按本文第5节提交。重录后重新构建、更新固件哈希和版本说明。
+
+Git 工作目录：`D:\工科大\e-control-arm-trim-github`。分支 main；继续工作先用 status/log/remote 确认进度，不要重复 init 或 remote add。源码与测试副本对应，上传忽略规则已准备。当前可运行测试目录与原团队Git仓库保留。
 
 2026-10-02 所有权问题已定位：工作目录属于 CodexSandboxOffline，而用户是 ljn。已在 `C:\Users\ljn\.gitconfig` 为 `D:/工科大/e-control-arm-trim-github` 添加单目录 safe.directory。用户如在另一环境仍报同样错误，先检查 `git config --global --show-origin --get-all safe.directory`，不要只复制错误提示而跳过执行。
 

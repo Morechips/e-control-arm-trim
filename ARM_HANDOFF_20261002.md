@@ -7,7 +7,7 @@
 ## 1. 新会话首先需要知道的事
 
 1. 当前实际开发、编译、台架测试目录是 `D:\工科大\e-control-trim-test-20261001`，当前交付软件为 **v4.5**。不要直接到原团队目录覆盖文件。
-2. `D:\工科大\e-control-arm-trim-github` 是准备上传到用户自己仓库的源码快照，当前已有 `.git`、分支 main，**尚无提交、尚无远程配置**。两目录不能当作自动同步的同一工作树。
+2. `D:\工科大\e-control-arm-trim-github` 是用户自己仓库的源码工作树，已完成首次提交和上传，main 跟踪 origin/main；首个源码提交为 **b4664dd**。两目录不能当作自动同步的同一工作树。
 3. 独立微调只控制平面三关节 **000、001、002**，保持模型中的抓点高度及方向，仅改变前后 X。003 是夹爪，不属于逆运动学微调。
 4. **v4.5 已修复三个固定参考动作附带 003 的问题**：抓球前、抓人质前、放球前都只发送 000～002，切换姿态保留当前夹爪。夹紧 P500、松开 P1800 由单独按钮控制。
 5. **抓人质前动作还没重录**。用户确认机械结构已经改变；当前仍保留旧值 1684/2136/785，不得宣称它是新安装下已验证的姿态。需要用户录好新的三个 P 值。
@@ -57,14 +57,14 @@
 | 位置 | 用途及接续注意事项 |
 |---|---|
 | `D:\工科大\e-control-trim-test-20261001` | 当前 v4.5 测试工程，源码、测试、脚本、当前固件、旧镜像备份齐全；该目录没有 Git 仓库 |
-| `D:\工科大\e-control-arm-trim-github` | 上传源码快照，去掉 build、firmware_direct、回退包等生成内容；已初始化 main，但本次核对无提交、无 remote |
+| `D:\工科大\e-control-arm-trim-github` | GitHub 源码工作树，去掉 build、firmware_direct、回退包等生成内容；已完成首次上传，main 跟踪 origin/main |
 | `D:\工科大\e-control-team-sync` | 原团队适配工作树；HEAD=db9c1d6，分支 feature/arm-team-sync，已有大量未提交修改；本轮不覆盖它 |
 | `D:\工科大\e-control-arm-trim-v4.5-firmware.zip` | 当前软件验证镜像包，785086 字节；包括匹配 ELF/HEX/BIN/MAP、哈希、烧录/校验/诊断脚本及 OpenOCD 配置 |
 | `D:\工科大\e-control-arm-trim-v4.4-firmware.zip` | 上一版保留的固件包，783056 字节；不可把它当成已去除固定动作 003 的版本 |
 
 原团队 remote 为 `https://github.com/gpnu-in-jnds/e-control.git`。测试副本来自本地 team-sync，后者的历史整合记录对照过 3021961 的协议和非机械臂变更；“副本来源”不代表当前测试目录等于远端最新 main，更不代表包含队友尚未交付的底盘重构。
 
-用户准备使用自己的仓库：`https://github.com/Morechips/e-control-arm-trim.git`。这是用户提供/正在关联的目标地址，本次未在线验证它的内容、提交或发布状态。
+用户自己的仓库：`https://github.com/Morechips/e-control-arm-trim.git`。2026-10-02 已完成首次源码推送，远端 main 与首个本地提交 `b4664dd5fe00023c73d51cdde6d5bbe28ff375cf` 核对一致。未创建 GitHub Release、未上传预编译 ZIP 附件，抓人质重录和实车验收仍待完成。
 
 ### 4.1 当前固件身份
 
@@ -595,9 +595,9 @@ powershell -ExecutionPolicy Bypass -File "D:\工科大\e-control-trim-test-20261
 
 夹紧后切换 BALL/BUCKET，检查不改变夹爪；松开后切换，检查仍松开；HOSTAGE 重录后补同样检查。源码和主机测试已完成这项修复，实物结果待用户反馈。
 
-### 优先三：把工作固化到用户仓库
+### 优先三：继续在用户仓库记录变更
 
-用户已开始关联仓库，但遇到 Git 所有权检查。待继续时不必重建/删除目录；先核对实际 status/log/remotes。用户若决定当前先上传软件快照，也可明确记录 HOSTAGE 未重录、v4.5 未实物验收；不要发布“全部验收通过”标签。
+首次源码提交和上传已完成，Git 所有权检查也已处理。继续时不必重建/删除目录；先核对实际 status/log/remotes。当前仓库保存软件基线，HOSTAGE 未重录、v4.5 未实物验收；不要发布“全部验收通过”标签。
 
 当前准备目录已同步 v4.5 源码、配置和测试，后续在测试目录改完必须同步；否则会出现板上固件和 Git 源码不匹配。两个目录不自动同步。`build/prepare_github.py` 是之前建立 v4.4 快照的一次性脚本，`build/package_v4_5.py` 也带“目录无Git/资产不存在”等前提断言；现在上传目录已有 Git，不能不经核对就重跑、删除目录或覆盖现有 Git 状态。
 
@@ -611,17 +611,17 @@ powershell -ExecutionPolicy Bypass -File "D:\工科大\e-control-trim-test-20261
 
 ## 17. GitHub 进展、所有权异常与首次推送
 
-本次文档核对：上传目录 `main` 无提交，`git remote -v` 无输出；没有确认已 push 成功。用户自己的目标链接为 `https://github.com/Morechips/e-control-arm-trim.git`。
+最初制作交接文档时，上传目录 `main` 无提交、无 remote。后续 2026-10-02 已解决所有权检查，完成首次源码提交 `b4664dd`，origin 为 `https://github.com/Morechips/e-control-arm-trim.git`，推送成功且已用 ls-remote 核对远端 main 一致。本仓库现在不再是未提交的空 Git 仓库。
 
 用户遇到：目录属于 `DESKTOP-DTPOII2/CodexSandboxOffline`，当前 PowerShell 用户为 `DESKTOP-DTPOII2/ljn`，Git 报 `detected dubious ownership`。解释是 Git 的所有权保护，不是代码损坏。
 
-应由用户在自己的 PowerShell 中仅信任此目录：
+现已在用户 `C:\Users\ljn\.gitconfig` 只添加此目录的信任条目并读回确认。换用户/环境又出现同样错误时，在对应用户自己的 PowerShell 中检查或仅信任此目录：
 
 ```powershell
 git config --global --add safe.directory "D:/工科大/e-control-arm-trim-github"
 ```
 
-代理在沙箱用户下运行同一命令不能假定已修改用户 ljn 的全局设置。只读核对时可使用每次命令的 `git -c safe.directory=...`；不要设 `safe.directory=*`，也不要为了消除提示删除 `.git` 或粗暴改整盘权限。
+此前用户的标准配置没有这个信任条目；本轮直接确认并写入了该用户的配置路径。代理在沙箱用户下仅运行 --global 不能不核对配置来源就假定已修改 ljn。只读核对时可使用每次命令的 `git -c safe.directory=...`；不要设 `safe.directory=*`，也不要为了消除提示删除 `.git` 或粗暴改整盘权限。
 
 用户之前写 `$repoUrl = Read-Host "https://..."` 后“卡住”：Read-Host 后面的 URL 是提示文字，仍在等待输入。可 Ctrl+C，然后直接赋值；不是 Git 网络卡死。
 
@@ -633,7 +633,7 @@ git status --short --branch
 git remote -v
 ```
 
-确认暂无提交/remote 后，手动执行：
+以下是首次提交流程的历史说明，当前仓库已完成，不要整块重跑；只有另建空目录且确认暂无提交/remote 时才使用：
 
 ```powershell
 git add .
@@ -650,7 +650,7 @@ git push -u origin main
 
 源码保存 Core、配置、tests、scripts、docs，忽略构建产物/回退包。匹配预编译镜像放 Release 附件，不直接 add 所有 ELF/HEX/BIN。`FIRMWARE_SHA256.txt` 记录镜像身份，不能让它继续指向旧构建。
 
-`GITHUB_FIRST_PUSH.md`、`README.md` 和 `RELEASE_NOTES_V4_5.md` 已有流程及当前未验收边界。发布之前依据用户最新决定更新文案，别把“准备了镜像包”说成“已发布”。
+`GITHUB_FIRST_PUSH.md`、`README.md` 和 `RELEASE_NOTES_V4_5.md` 已有流程及当前未验收边界。现在源码已上传，但没有 GitHub Release，固件 ZIP 仍是本地资产；不要把源码推送说成已发布镜像或已完成硬件验收。
 
 ## 18. 快速阅读清单和操作约定
 
