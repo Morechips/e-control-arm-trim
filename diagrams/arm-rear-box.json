@@ -1,0 +1,45 @@
+{
+  "units": "mm",
+  "frame_origin": "joint_000_axis",
+  "x_positive": "toward_grasp_object_away_from_car",
+  "z_positive": "up",
+  "nearest_rear_face_distance": 30,
+  "depth": 40,
+  "width": 100,
+  "height_from_baseboard": 70,
+  "joint_000_height_above_baseboard": 31.2,
+  "bounds": {
+    "x": [
+      -70,
+      -30
+    ],
+    "y": [
+      -50,
+      50
+    ],
+    "z": [
+      -31.2,
+      38.8
+    ]
+  },
+  "assumptions": [
+    "box_axis_aligned_to_car",
+    "box_centered_at_y_0"
+  ],
+  "firmware_collision_checker_enabled": true,
+  "missing": [
+    "arm_part_envelopes",
+    "camera_and_bracket_envelope",
+    "gripper_envelopes",
+    "clearance_margin"
+  ],
+  "firmware_collision_checker_scope": "arm_trim_only",
+  "operator_approximate_arm_thickness_mm": 24,
+  "provisional_capsule_radii_mm": [
+    15,
+    20,
+    60
+  ],
+  "provisional_clearance_mm": 5,
+  "envelope_estimated": true
+}

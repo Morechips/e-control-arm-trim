@@ -1,0 +1,17 @@
+#ifndef LASER_CONFIG_H
+#define LASER_CONFIG_H
+
+#include "main.h"
+
+#define LASER_TRIGGER_GPIO_PORT GPIOC
+#define LASER_TRIGGER_GPIO_PIN GPIO_PIN_3
+#define LASER_TRIGGER_GPIO_CLK_ENABLE() __HAL_RCC_GPIOC_CLK_ENABLE()
+#define LASER_HOLD_MS 2000U
+
+/* PB8 uses the MCU internal pull-up; pressing the button connects it to GND. */
+#define LASER_BUTTON_GPIO_PORT GPIOB
+#define LASER_BUTTON_GPIO_PIN GPIO_PIN_8
+#define LASER_BUTTON_GPIO_CLK_ENABLE() __HAL_RCC_GPIOB_CLK_ENABLE()
+#define LASER_BUTTON_DEBOUNCE_MS 20U
+
+#endif
