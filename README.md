@@ -1,10 +1,10 @@
 # JNDS 电控固件
 
+本分支 `feature/merged-team-arm-20261003` 保存 **队友整车代码 + 可移植机械臂微调模块** 的合并版，构建标识为 `v4.6-team-main-20261003`。分支入口、编译和烧录流程见 [MERGED_BRANCH_README.md](MERGED_BRANCH_README.md)；手机设置见 [蓝牙控制器完整指引](BLUETOOTH_CONTROLLER_GUIDE.md)。根目录旧版联调文档及 `releases/v4.6/` 是历史记录，当前版本以这些入口和源码为准。
+
 基于 STM32F407 和 STM32 HAL 的四轮麦克纳姆小车电控工程，包含蓝牙遥控、Emm42 电机通信、JY61 航向控制、MaxiCam 二维码通知、ZL-IS2 舵机驱动及路线/动作状态机。
 
-本分支在 [Morechips/e-control-arm-trim](https://github.com/Morechips/e-control-arm-trim) v4.5 基线上导入 [gpnu-in-jnds/e-control](https://github.com/gpnu-in-jnds/e-control) 的 e7404c5，接入可移植机械臂微调。具体接口、手机协议、验证边界、固件与烧录命令见 [ARM_TRIM_INTEGRATION.md](ARM_TRIM_INTEGRATION.md)。下文保留队友原系统说明，当前接入状态以本表与该记录为准。
-
-2026-10-03，用户确认本次 **v4.6 已实测**，并授权推送代码。发布保留已实测源码和固件参数；原 v4.5 可从 Git 历史提交 `e0b5bc9` 恢复。
+本目录基于 <https://github.com/gpnu-in-jnds/e-control> 的 main（2026-10-03 拉取，e7404c5），接入可移植机械臂微调模块。手机配置优先看 [蓝牙控制器完整指引](BLUETOOTH_CONTROLLER_GUIDE.md)，本次接入与验证见 [LATEST_INTEGRATION_REPORT.md](LATEST_INTEGRATION_REPORT.md)。下方保留队友整车说明，历史联调过程见文末报告，运行配置以当前代码为准。
 
 ## 当前功能与接入状态
 
@@ -17,9 +17,10 @@
 | MaxiCam 二维码与目标偏移 | 已接入 UART4；区分独立 `0x80` 二维码包和 5 字节位置包 |
 | 视觉任务三位值解码 | 独立接口已实现，尚未与完整视觉串口协议绑定 |
 | 固定路线与任务状态机 | 路线及排爆/反恐/救援状态链已实现；正式主循环仍未启动路线 |
-| 原地右转 90° | 独立状态机已实现；正式遥控未绑定触发入口 |
+| 遥控转向 | 正式遥控支持右90°/右180°/左90°按下沿触发 |
 | ZL-IS2 舵机控制器 | USART3 中断发送：手机姿态、AIM/RST、GAP；PE4 仅台架配置；旧 ARM 模块不参与正式构建 |
-| 独立机械臂微调 | 已接入：纯 C11 核心、项目参数、Servo 独占服务及 7/11 字节独立手机页；三关节微调与 003 夹爪分开 |
+| 机械臂局部前后微调 | 已接入；7字节独立页面或文本；三个参考姿态只动000～002，003夹爪单独控制；HOSTAGE待重录 |
+| 机械安装/动作录入 | 电脑端总线舵机读取向导；配置导出/应用后须重新编译；任意多步动作组播放器未接入 |
 | XDK42 | 仅保留 USART6 候选配置，当前串口由蓝牙占用 |
 | OLED / 按钮显示 | 可选 SSD1306，失败不阻断遥控；按钮文案仅台架配置 |
 | PB8 红外触发按钮 | 仅 `CAR_TEST_INPUTS_ENABLE=1` 编译，正式配置无手动触发 |
@@ -375,11 +376,11 @@ UART 注册表按 handle 路由接收、TX 队列和错误事件。RX 错误/恢
 
 `servo.h` 提供单一舵机接口，预设、ASCII 协议及队列全部在 `servo.c`。`Servo_SetValues()` 发送 ID000 起的最多四路 PWM；`Servo_SetCommands()` 支持任意协议 ID 和历史 24 路能力，统一类型为 `ServoCommand_t {id,pwm,time_ms}`。所有组合指令带 T，旧 ZLIS2/ServoPose/ServoRemote 接口和文件已删除。GAP 沿用 `{#003PxxxxT2000!}` 单路组合格式。发送路径无 snprintf/vsnprintf 和 363 B 栈缓冲，协议字符串保持逐字节一致。
 
-USART3 115200 8N1、中断优先级 3，全局 HAL 回调由 uart_driver 统一分派。驱动拥有两份 362 B 帧缓存保存当前及最新待发项；预设仍为 Flash 常量。队列由公共 `UartTxQueue_t` 管理，Servo 构造协议并映射 `ServoStatus_t`（0～6 数值不变），不读取蓝牙或 GPIO。旧 arm_control/arm_tuner 及旧项目运动学帮助函数仅历史测试使用；正式微调使用独立运动学核心。微调持有 Servo 独占时拒绝其他姿态与 GAP；其传输必须确认实际 STARTED/TC，完整接入行为见 ARM_TRIM_INTEGRATION.md。
+USART3 115200 8N1、中断优先级 3，TX 回调由 uart_bridge 分派。驱动拥有两份 362 B 帧缓存以保存当前及最新待发项，故 RAM 会增加；预设仍为 Flash 常量。主循环不用等待 62 B 的 5.38 ms 线时，实际耗时仍需台架测量。队列状态由公共 `UartTxQueue_t` 管理，Servo 内部构造协议及映射 `ServoStatus_t`（原状态含义及 0～6 数值不变）。Servo 不读取蓝牙或 GPIO。旧 arm_control/arm_tuner 仅历史主机测试使用；正式主循环接入纯 arm_kinematics/arm_collision/arm_trim 核心及项目适配层，详见 ARM_TRIM_INTEGRATION.md。
 
 手机布尔姿态映射使用分组 `ServoCode`；旧 `ServoPose_t` 及其适配层已删除。旧蓝牙数值模式映射及其 0～10 编号已删除；29/31/35 字节帧的保留 short 仍占原有位置，以维持其他字段的线协议布局。
 
-旧 `arm_control.c`、`arm_tuner.c` 及历史回归保留；正式固件不支持旧 @ARM 调参或双摇杆控制。新 `@ARM TRIM` 接口和微调停止由独立 core/service 处理，原接口与手机页说明见 ARM_TRIM_INTEGRATION.md。
+旧 `arm_control.c`、`arm_tuner.c`、`arm_kinematics.c` 及独立回归测试作为历史模块保留；正式固件不支持 @ARM 调参或机械臂双摇杆，也不会由旧状态机追加停止报文。若未来重新接入，需要另行设计串口独占关系。
 
 实车联调须确认控制器供电、共地、PB10→控制器 RX、控制器实际波特率及运动空间。此前日志中的 `TX OK` 仅表示 STM32 完成发送，不能证明舵机控制器已接收或机械臂到位。
 

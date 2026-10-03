@@ -37,6 +37,44 @@
 #define ARM_TRIM_PROJECT_P2_B 571U
 #endif
 
+/* Joint 000 uses +X as zero; 001/002 are relative to the preceding link. */
+#ifndef ARM_TRIM_PROJECT_Q0_A_DEG
+#define ARM_TRIM_PROJECT_Q0_A_DEG 0.0f
+#endif
+#ifndef ARM_TRIM_PROJECT_Q0_B_DEG
+#define ARM_TRIM_PROJECT_Q0_B_DEG 45.0f
+#endif
+#ifndef ARM_TRIM_PROJECT_Q1_A_DEG
+#define ARM_TRIM_PROJECT_Q1_A_DEG 0.0f
+#endif
+#ifndef ARM_TRIM_PROJECT_Q1_B_DEG
+#define ARM_TRIM_PROJECT_Q1_B_DEG (-90.0f)
+#endif
+#ifndef ARM_TRIM_PROJECT_Q2_A_DEG
+#define ARM_TRIM_PROJECT_Q2_A_DEG 0.0f
+#endif
+#ifndef ARM_TRIM_PROJECT_Q2_B_DEG
+#define ARM_TRIM_PROJECT_Q2_B_DEG (-90.0f)
+#endif
+#ifndef ARM_TRIM_PROJECT_SEARCH_MM
+#define ARM_TRIM_PROJECT_SEARCH_MM 75.0f
+#endif
+#ifndef ARM_TRIM_PROJECT_SPEED_MM_S
+#define ARM_TRIM_PROJECT_SPEED_MM_S 10.0f
+#endif
+#ifndef ARM_TRIM_PROJECT_ACCELERATION_MM_S2
+#define ARM_TRIM_PROJECT_ACCELERATION_MM_S2 20.0f
+#endif
+#ifndef ARM_TRIM_PROJECT_MAX_SEGMENT_MM
+#define ARM_TRIM_PROJECT_MAX_SEGMENT_MM 2.0f
+#endif
+#ifndef ARM_TRIM_PROJECT_UPDATE_PERIOD_MS
+#define ARM_TRIM_PROJECT_UPDATE_PERIOD_MS 50U
+#endif
+#ifndef ARM_TRIM_PROJECT_SETTLE_MS
+#define ARM_TRIM_PROJECT_SETTLE_MS 300U
+#endif
+
 /* Use the operator-confirmed joint travel.  The v4
  * jog can use the contiguous model range within the original 75mm search;
  * these scalar bounds do not represent collision checks or real feedback. */
@@ -95,6 +133,12 @@
 #endif
 
 /* User-confirmed gripper targets, independent of planar trim. */
+#ifndef ARM_TRIM_GRIPPER_MIN_P
+#define ARM_TRIM_GRIPPER_MIN_P 500U
+#endif
+#ifndef ARM_TRIM_GRIPPER_MAX_P
+#define ARM_TRIM_GRIPPER_MAX_P 2500U
+#endif
 #ifndef ARM_TRIM_BENCH_CLOSE_P
 #define ARM_TRIM_BENCH_CLOSE_P 500U
 #endif

@@ -1,9 +1,11 @@
-param([switch]$DisableArmTrim)
+param([switch]$DisableArmTrim, [string]$OutputDirectory = 'firmware_direct')
 
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$outputDirectory = Join-Path $projectRoot 'firmware_direct'
+$outputDirectory = if ([IO.Path]::IsPathRooted($OutputDirectory)) {
+    $OutputDirectory
+} else { Join-Path $projectRoot $OutputDirectory }
 $objectDirectory = Join-Path $outputDirectory 'obj'
 
 $compiler = (Get-Command arm-none-eabi-gcc -ErrorAction Stop).Source
@@ -122,7 +124,9 @@ try {
         $trimBuildInputHashes[$trimBuildInput] = (Get-FileHash -LiteralPath (Join-Path $projectRoot $trimBuildInput) -Algorithm SHA256).Hash
     }
     $trimBuildManifest = [ordered]@{
-        version = 'v4.6-servo-integration'
+        version = 'v4.6-team-main-20261003'
+        upstream_repository = 'https://github.com/gpnu-in-jnds/e-control'
+        upstream_base_commit = 'e7404c592df92c7c5e7a9d09562e302ebf52e2b3'
         built_utc = [DateTime]::UtcNow.ToString('o')
         arm_trim_enabled = (-not $DisableArmTrim)
         compiler = (& $compiler --version | Select-Object -First 1)

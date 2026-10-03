@@ -155,6 +155,8 @@ void ArmTrimInput_Init(void)
     config.profile_guard_ms = ARM_TRIM_PROFILE_GUARD_MS;
     config.grip_move_ms = ARM_TRIM_GRIP_MOVE_MS;
     config.grip_guard_ms = ARM_TRIM_GRIP_GUARD_MS;
+    config.grip_min_pwm = ARM_TRIM_GRIPPER_MIN_P;
+    config.grip_max_pwm = ARM_TRIM_GRIPPER_MAX_P;
     configured = ArmTrimService_Init(&config, Now, NULL) == ARM_TRIM_OK;
     packet_pending = line_pending = invalidated = jog_down = jog_active = false;
     previous_buttons = 0U;

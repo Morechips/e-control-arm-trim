@@ -1,14 +1,12 @@
-# 机械臂微调接入记录（v4.6，2026-10-02）
+# 机械臂模块接入说明（v4.6 / team-main，2026-10-03）
 
-v4.6 在独立工作目录中开发，再从已交付源码快照整理发布。用户上传的基线是 Morechips/e-control-arm-trim 的 `e0b5bc92815b6051c00830d4a1eee746fbe10c52`；接入前已核对远端与本地提交相同、本地源码无差异。在此基础上导入 gpnu-in-jnds/e-control 的 `e7404c592df92c7c5e7a9d09562e302ebf52e2b3`，再接入微调。原始 v4.5 台架目录不改，v4.5 源码保留在 Git 历史中。
+本目录 `D:\工科大\e-control-arm-trim-latest-20261003` 是新拉取的队友 `gpnu-in-jnds/e-control` main，基线 `e7404c592df92c7c5e7a9d09562e302ebf52e2b3`。在此基线上导入已有模块化机械臂、服务与输入适配、安装配置向导，并重新运行回归和完整构建。旧工作目录和已核对固件不改，本次未推送或操作硬件。
 
-2026-10-03，用户确认本次 v4.6 已实测，并授权将代码推送到 Morechips/e-control-arm-trim。发布采用 main 的普通快进更新，保留既有提交历史；没有改变已实测的控制代码、安装参数或固件。硬件实测结论由用户提供，本次提交与推送未操作硬件。
-
-发布源码的 259 项构建输入已与原清单逐项核对。原构建清单及版本说明存放在 releases/v4.6，v4.6 标签固定本次版本。交付后的独立参数化改动保留在原开发目录，未混入该标签。
-
-本地交付目录为 `firmware_direct`：可烧录 ELF/HEX/BIN、构建 manifest、`arm-trim-core-v4.6.zip`（六个纯核心文件和独立示例）以及 `arm-trim-to-e-control-e7404c5.patch`（相对于队友指定提交的接入改动，已在该精确 Git 树上通过 apply-check）。本工作目录已包含这些改动，不必再应用补丁。生成固件及压缩包继续由 .gitignore 排除，Git 保存源码、测试与说明。
+可烧录产物在 `firmware_direct`，默认启用机械臂模块。完整蓝牙配置见 [BLUETOOTH_CONTROLLER_GUIDE.md](BLUETOOTH_CONTROLLER_GUIDE.md)，精确基线、改动范围与本次验证见 [LATEST_INTEGRATION_REPORT.md](LATEST_INTEGRATION_REPORT.md)。
 
 ## 模块边界
+
+2026-10-03补充：新增电脑端安装配置与总线舵机动作录入向导，见 [ARM_SETUP_GUIDE.md](ARM_SETUP_GUIDE.md)。配置适配层现在支持各关节两点标定角、轨迹策略和夹爪限位；默认值保持原安装参数。`scripts/setup_arm.ps1` 自动查询已调好姿态的P，三份配置先导出再应用；多步动作组为独立数据导出，未接入固件播放器。本次整合固件已重新构建到本目录 firmware_direct；旧目录的已核对镜像不改。
 
 | 层 | 文件 | 负责什么 |
 | --- | --- | --- |
@@ -40,7 +38,7 @@ Servo 会话从空闲串口取得独占，直到 END、取消/故障停止及串
 
 HOSTAGE 沿用旧安装值，仍待用户重新记录，未臆造替代数值。夹爪关为 P500、开为 P1800。L1=104.85、L2=84.75、工具偏移=(121.1538,52.4) mm；关节限位分别 915..1800、947..2500、500..1874。微调保持 Z 和末端角度，仅改变 X；速度上限 10 mm/s、加速度 20 mm/s²、分段周期 50 ms。
 
-当前后箱为 X[-70,-30]、Y[-50,50]、Z[-31.2,38.8] mm；包络半径 15/20/60 mm 是估计值，额外间隙 5 mm。用户已确认 v4.6 实测；上述偏移范围仍属于模型计算结果，不能由该确认推定每个边界都完成了定量测量。READY/PREP 和队友已有固定姿态的整个移动路径没有被微调规划器做碰撞预检；它们不能据此称为安全轨迹。现有 HOSTAGE_LIFT=1800/1855/528 在当前箱体模型中被挡，队友原动作表仍保留原值。
+当前后箱为 X[-70,-30]、Y[-50,50]、Z[-31.2,38.8] mm；包络半径 15/20/60 mm 是估计值，额外间隙 5 mm。用户此前对长按版本有定性联调反馈；本目录本次构建未做实车验收，上述偏移范围仍属于模型计算结果。READY/PREP 和队友已有固定姿态的整个移动路径没有被微调规划器做碰撞预检；它们不能据此称为安全轨迹。现有 HOSTAGE_LIFT=1800/1855/528 在当前箱体模型中被挡，队友原动作表仍保留原值。
 
 预检仍同步完成，最多保存 512 段；本次没有测量它在 16 MHz MCU 上的计算时间。实机验收需记录预检对合作式主循环的阻塞时间及实际串口节拍，不能以主机测试耗时替代该测量。
 
@@ -81,16 +79,16 @@ ydnum 是 -150..150 的有符号 short，只取正负方向；0 不启动。固�
 
 主机回归：tests/uart、zlis2、servo、arm_trim、arm_collision、arm_kinematics、arm_trim_service、arm_trim_input、arm、arm_bt、car、vision、route 各自的 run.ps1。服务测试同时包含替身边界及真实 Servo/UART 队列联动。主机验证不证明实机停止或到位。
 
-已通过：同步微调 48708、异步微调 327、碰撞 40、运动学 61、服务 2379、真实 Servo/UART 1029、手机解析 266126、实际输入层 184、Servo 协议 186、原蓝牙 Servo 8103/8201、历史 arm 237 和 arm_bt 22652；uart/car/vision/route 整套回归通过。独立移植示例也已通过。整车测试有两处默认 PID 精确比较受 MinGW x87 中间精度影响，已用存储后的 float 默认参数比较并显式设置格式测试输入，生产 PID 参数未改。
+已通过：同步微调 48708、异步微调 327、碰撞 40、运动学 61、服务 2762、真实 Servo/UART 1029、手机解析 266126、实际输入层 184、Servo 协议 186、原蓝牙 Servo 8103/8201、历史 arm 237 和 arm_bt 22652；uart/car/vision/route 整套回归通过。独立移植示例也已通过。整车测试有两处默认 PID 精确比较受 MinGW x87 中间精度影响，已用存储后的 float 默认参数比较并显式设置格式测试输入，生产 PID 参数未改。
 
-最终直接 GCC 产物 text=80248、data=476、bss=23996 字节。BIN SHA256 为 `1DC1AA77523B4EB0E4C00288CF9B5B9A28DAFB18CCE2058BFE108E883B310203`；HEX 为 `0580AB6C1BFD60D5B9FEB6653BA512CFC5BFD7DEB9E36DBA11757F6CCAD4CE93`。ELF 哈希及精确构建输入见随固件生成的 manifest。C 编译使用 -Wall -Wextra -Werror；链接器仍输出 nosys 的未实现系统调用提示，这些不用于设备通信。
+本次直接 GCC 产物 text=80360、data=476、bss=24004 字节。BIN SHA256 为 `6CAFD7AFFB78A1AF0CCE500E4A0F798AC9EFF522C2855F5EAD8C3B30F0D01E9F`；HEX 为 `6880E52CE55393608580C23C8D04B8749D61FA6CC25878965F3A510A4C6CC71A`。ELF 哈希及精确构建输入见随固件生成的 manifest。C 编译使用 -Wall -Wextra -Werror；链接器仍输出 nosys 的未实现系统调用提示，这些不用于设备通信。
 
-本机直接 GCC 完整构建已成功。所装 CMake 3.28.1 在配置阶段退出码 -1073740791；未确认原因，不能把它当成 CMake 构建通过。CMake/Keil 源清单已同步，Keil 未运行编译。
+本次直接 GCC 完整构建及关闭微调的完整构建均成功。CMake/Keil 源清单已同步，Keil XML 已检查，但本次未执行 CMake/Keil 编译。
 
 以下是供操作员使用的完整命令；本次没有连接、烧录或复位硬件：
 
 ```powershell
-Set-Location 'D:\工科大\e-control-arm-trim-v4.6-publish'
+Set-Location 'D:\工科大\e-control-arm-trim-latest-20261003'
 $env:PATH = 'C:\ST\STM32CubeCLT_1.21.0\GNU-tools-for-STM32\bin;' + $env:PATH
 powershell -ExecutionPolicy Bypass -File .\scripts\build_firmware.ps1
 # 操作员确认目标板、供电、SWD、机械臂支撑与车轮离地之后执行：
@@ -100,4 +98,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify_firmware.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\read_bluetooth_diagnostics.ps1 -SymbolsOnly
 ```
 
-v4.5 手工交接和旧手机说明保留作历史资料；接入状态、接口与新固件以本文和当前源码为准。队友重构说明见 TEAM_REFACTOR_REVIEW.md。
+完整手机配置以 BLUETOOTH_CONTROLLER_GUIDE.md 为准；接入与本次测试记录见 LATEST_INTEGRATION_REPORT.md。

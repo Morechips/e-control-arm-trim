@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "name": "current_v4_6_example",
+  "geometry": {
+    "link_1_mm": 104.85,
+    "link_2_mm": 84.75,
+    "tool_x_mm": 121.1538,
+    "tool_z_mm": 52.4,
+    "tool_axis_offset_deg": 0.0
+  },
+  "joints": [
+    {
+      "id": 0,
+      "min_pwm": 915,
+      "max_pwm": 1800,
+      "calibration": [
+        {
+          "pwm": 989,
+          "angle_deg": 0.0
+        },
+        {
+          "pwm": 1309,
+          "angle_deg": 45.0
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "min_pwm": 947,
+      "max_pwm": 2500,
+      "calibration": [
+        {
+          "pwm": 1687,
+          "angle_deg": 0.0
+        },
+        {
+          "pwm": 2344,
+          "angle_deg": -90.0
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "min_pwm": 500,
+      "max_pwm": 1874,
+      "calibration": [
+        {
+          "pwm": 1232,
+          "angle_deg": 0.0
+        },
+        {
+          "pwm": 571,
+          "angle_deg": -90.0
+        }
+      ]
+    }
+  ],
+  "references": {
+    "BALL": {
+      "positions": [
+        1356,
+        1850,
+        698
+      ],
+      "confirmed": false,
+      "note": "待实机验收"
+    },
+    "HOSTAGE": {
+      "positions": [
+        1684,
+        2136,
+        785
+      ],
+      "confirmed": false,
+      "note": "旧安装值，待重录"
+    },
+    "BUCKET": {
+      "positions": [
+        1566,
+        1896,
+        673
+      ],
+      "confirmed": false,
+      "note": "待实机验收"
+    }
+  },
+  "gripper": {
+    "id": 3,
+    "min_pwm": 500,
+    "max_pwm": 2500,
+    "close_pwm": 500,
+    "open_pwm": 1800
+  },
+  "collision": {
+    "enabled": true,
+    "box_min_mm": [
+      -70.0,
+      -50.0,
+      -31.2
+    ],
+    "box_max_mm": [
+      -30.0,
+      50.0,
+      38.8
+    ],
+    "radii_mm": [
+      15.0,
+      20.0,
+      60.0
+    ],
+    "envelope_estimated": true,
+    "clearance_mm": 5.0,
+    "sweep_resolution_mm": 0.5
+  },
+  "trim": {
+    "search_mm": 75.0,
+    "min_offset_mm": -75.0,
+    "max_offset_mm": 75.0,
+    "max_segment_mm": 2.0,
+    "speed_mm_s": 10.0,
+    "acceleration_mm_s2": 20.0,
+    "update_period_ms": 50,
+    "settle_ms": 300
+  },
+  "timing": {
+    "reference_move_ms": 2000,
+    "reference_guard_ms": 300,
+    "grip_move_ms": 1500,
+    "grip_guard_ms": 300
+  },
+  "action_groups": []
+}

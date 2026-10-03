@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "name": "new_installation",
+  "geometry": {
+    "link_1_mm": null,
+    "link_2_mm": null,
+    "tool_x_mm": null,
+    "tool_z_mm": null,
+    "tool_axis_offset_deg": null
+  },
+  "joints": [
+    {
+      "id": 0,
+      "min_pwm": null,
+      "max_pwm": null,
+      "calibration": [
+        {
+          "pwm": null,
+          "angle_deg": null
+        },
+        {
+          "pwm": null,
+          "angle_deg": null
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "min_pwm": null,
+      "max_pwm": null,
+      "calibration": [
+        {
+          "pwm": null,
+          "angle_deg": null
+        },
+        {
+          "pwm": null,
+          "angle_deg": null
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "min_pwm": null,
+      "max_pwm": null,
+      "calibration": [
+        {
+          "pwm": null,
+          "angle_deg": null
+        },
+        {
+          "pwm": null,
+          "angle_deg": null
+        }
+      ]
+    }
+  ],
+  "references": {
+    "BALL": {
+      "positions": null,
+      "confirmed": false,
+      "note": "未录入"
+    },
+    "HOSTAGE": {
+      "positions": null,
+      "confirmed": false,
+      "note": "未录入"
+    },
+    "BUCKET": {
+      "positions": null,
+      "confirmed": false,
+      "note": "未录入"
+    }
+  },
+  "gripper": {
+    "id": 3,
+    "min_pwm": null,
+    "max_pwm": null,
+    "close_pwm": null,
+    "open_pwm": null
+  },
+  "collision": {
+    "enabled": false,
+    "box_min_mm": [
+      null,
+      null,
+      null
+    ],
+    "box_max_mm": [
+      null,
+      null,
+      null
+    ],
+    "radii_mm": [
+      null,
+      null,
+      null
+    ],
+    "envelope_estimated": true,
+    "clearance_mm": null,
+    "sweep_resolution_mm": 0.5
+  },
+  "trim": {
+    "search_mm": 75.0,
+    "min_offset_mm": -5.0,
+    "max_offset_mm": 5.0,
+    "max_segment_mm": 2.0,
+    "speed_mm_s": 10.0,
+    "acceleration_mm_s2": 20.0,
+    "update_period_ms": 50,
+    "settle_ms": 300
+  },
+  "timing": {
+    "reference_move_ms": 2000,
+    "reference_guard_ms": 300,
+    "grip_move_ms": 1500,
+    "grip_guard_ms": 300
+  },
+  "action_groups": []
+}

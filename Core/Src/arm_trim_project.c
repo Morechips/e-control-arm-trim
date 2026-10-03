@@ -20,15 +20,21 @@ void ArmTrimProject_Calibrations(ArmServoCalibration_t calibration[3])
     if (calibration == NULL) return;
     calibration[0] = (ArmServoCalibration_t){
         ARM_TRIM_PROJECT_P0_MIN, ARM_TRIM_PROJECT_P0_MAX,
-        ARM_TRIM_PROJECT_P0_A, ARM_TRIM_PROJECT_P0_B, 0.0f, PROJECT_PI / 4.0f
+        ARM_TRIM_PROJECT_P0_A, ARM_TRIM_PROJECT_P0_B,
+        ARM_TRIM_PROJECT_Q0_A_DEG * PROJECT_PI / 180.0f,
+        ARM_TRIM_PROJECT_Q0_B_DEG * PROJECT_PI / 180.0f
     };
     calibration[1] = (ArmServoCalibration_t){
         ARM_TRIM_PROJECT_P1_MIN, ARM_TRIM_PROJECT_P1_MAX,
-        ARM_TRIM_PROJECT_P1_A, ARM_TRIM_PROJECT_P1_B, 0.0f, -PROJECT_PI / 2.0f
+        ARM_TRIM_PROJECT_P1_A, ARM_TRIM_PROJECT_P1_B,
+        ARM_TRIM_PROJECT_Q1_A_DEG * PROJECT_PI / 180.0f,
+        ARM_TRIM_PROJECT_Q1_B_DEG * PROJECT_PI / 180.0f
     };
     calibration[2] = (ArmServoCalibration_t){
         ARM_TRIM_PROJECT_P2_MIN, ARM_TRIM_PROJECT_P2_MAX,
-        ARM_TRIM_PROJECT_P2_A, ARM_TRIM_PROJECT_P2_B, 0.0f, -PROJECT_PI / 2.0f
+        ARM_TRIM_PROJECT_P2_A, ARM_TRIM_PROJECT_P2_B,
+        ARM_TRIM_PROJECT_Q2_A_DEG * PROJECT_PI / 180.0f,
+        ARM_TRIM_PROJECT_Q2_B_DEG * PROJECT_PI / 180.0f
     };
 }
 
@@ -57,6 +63,12 @@ void ArmTrimProject_DefaultConfig(ArmTrimConfig_t *config)
     ArmTrimProject_Geometry(&config->geometry);
     ArmTrimProject_Calibrations(config->calibration);
     ArmTrimProject_Collision(&config->collision);
+    config->search_mm = ARM_TRIM_PROJECT_SEARCH_MM;
+    config->speed_mm_s = ARM_TRIM_PROJECT_SPEED_MM_S;
+    config->acceleration_mm_s2 = ARM_TRIM_PROJECT_ACCELERATION_MM_S2;
+    config->max_segment_mm = ARM_TRIM_PROJECT_MAX_SEGMENT_MM;
+    config->update_period_ms = ARM_TRIM_PROJECT_UPDATE_PERIOD_MS;
+    config->settle_ms = ARM_TRIM_PROJECT_SETTLE_MS;
     config->enabled_min_mm = ARM_TRIM_PROJECT_MIN_MM;
     config->enabled_max_mm = ARM_TRIM_PROJECT_MAX_MM;
 }

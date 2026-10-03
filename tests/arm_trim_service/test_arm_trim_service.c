@@ -373,6 +373,32 @@ static void TestCompletedDeadlineValidation(void)
     Finish();
     CHECK(ArmTrimService_ClearFault() == ARM_TRIM_OK);
 }
+static void TestConfiguredGripperLimits(void)
+{
+    ArmTrimServiceConfig_t config;
+    unsigned before;
+    Init();
+    config = Config();
+    config.grip_min_pwm = 700U;
+    config.grip_max_pwm = 1900U;
+    CHECK(ArmTrimService_Init(&config, Now, &tick) == ARM_TRIM_OK);
+    BeginBall();
+    before = record_count;
+    CHECK(ArmTrimService_Grip(500U) == ARM_TRIM_INVALID);
+    CHECK(ArmTrimService_Grip(2000U) == ARM_TRIM_INVALID);
+    CHECK(record_count == before);
+    CHECK(ArmTrimService_Grip(700U) == ARM_TRIM_OK);
+    Finish();
+    CHECK(ArmTrimService_End() == ARM_TRIM_OK);
+    Finish();
+    CHECK(!ArmTrimService_OwnsMotion());
+    config.grip_min_pwm = 1900U;
+    config.grip_max_pwm = 700U;
+    CHECK(ArmTrimService_Init(&config, Now, &tick) == ARM_TRIM_INVALID);
+    config.grip_min_pwm = 0U;
+    config.grip_max_pwm = 1900U;
+    CHECK(ArmTrimService_Init(&config, Now, &tick) == ARM_TRIM_INVALID);
+}
 int main(void)
 {
     TestProfileAndGrip();
@@ -382,6 +408,7 @@ int main(void)
     TestCoreCancelAndClockWrap();
     TestMotionFailureAndStopFailure();
     TestCompletedDeadlineValidation();
+    TestConfiguredGripperLimits();
     printf("Arm trim service tests: %u checks passed\n", checks);
     return 0;
 }

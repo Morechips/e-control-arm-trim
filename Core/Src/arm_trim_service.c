@@ -156,6 +156,9 @@ ArmTrimResult_t ArmTrimService_Init(const ArmTrimServiceConfig_t *config,
         config->profile_move_ms > 9999U || config->profile_guard_ms > 60000U ||
         config->grip_move_ms == 0U || config->grip_move_ms > 9999U ||
         config->grip_guard_ms > 60000U) return Result(ARM_TRIM_INVALID);
+    if ((config->grip_min_pwm != 0U || config->grip_max_pwm != 0U) &&
+        (config->grip_min_pwm < 500U || config->grip_max_pwm > 2500U ||
+         config->grip_min_pwm >= config->grip_max_pwm)) return Result(ARM_TRIM_INVALID);
     for (profile = 0U; profile < ARM_TRIM_PROFILE_COUNT; ++profile)
         for (joint = 0U; joint < 3U; ++joint)
             if (config->references[profile][joint] < config->core.calibration[joint].min_position ||
@@ -167,6 +170,10 @@ ArmTrimResult_t ArmTrimService_Init(const ArmTrimServiceConfig_t *config,
     result = ArmTrim_SetAsyncIO(&service.trim, &async);
     if (result != ARM_TRIM_OK) return Result(result);
     service.config = *config;
+    if (service.config.grip_min_pwm == 0U && service.config.grip_max_pwm == 0U) {
+        service.config.grip_min_pwm = 500U;
+        service.config.grip_max_pwm = 2500U;
+    }
     service.clock = now;
     service.clock_user = user;
     service.state = ARM_TRIM_SERVICE_IDLE;
@@ -259,7 +266,8 @@ ArmTrimResult_t ArmTrimService_Grip(uint16_t pwm)
     ArmTrimResult_t result = ReferenceAvailable();
     ServoCommand_t command = {3U, pwm, service.config.grip_move_ms};
     if (result != ARM_TRIM_OK) return Result(result);
-    if (pwm < 500U || pwm > 2500U) return Result(ARM_TRIM_INVALID);
+    if (pwm < service.config.grip_min_pwm || pwm > service.config.grip_max_pwm)
+        return Result(ARM_TRIM_INVALID);
     service.operation_tick = Now(&service);
     result = FromServo(Servo_SetCommandsOwned(&service, &command, 1U));
     if (result != ARM_TRIM_OK) return Result(result);

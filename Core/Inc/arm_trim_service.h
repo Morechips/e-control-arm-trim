@@ -30,6 +30,8 @@ typedef struct {
     uint16_t references[ARM_TRIM_PROFILE_COUNT][3];
     uint16_t profile_move_ms, profile_guard_ms;
     uint16_t grip_move_ms, grip_guard_ms;
+    /* Zero/zero preserves the original 500..2500 protocol range. */
+    uint16_t grip_min_pwm, grip_max_pwm;
 } ArmTrimServiceConfig_t;
 
 typedef struct {
