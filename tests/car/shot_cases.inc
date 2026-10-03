@@ -92,11 +92,23 @@ static void TestShotBluetoothSwitch(void)
     Reset(0U); Ready();
     c.Shot = 1;
     ShotControlFrame(c); Step(100U);
+    /* MaxiCam_Process() keeps running its mode step, but no notice has arrived. */
+    TestMaxiCam_ModeStep();
     assert(Car_Control_GetState() == CAR_SHOT_ALIGNING &&
-           TestMaxiCam_LastMode() == MODE_CMD_AIM &&
-           TestMaxiCam_ModeCount() == 1U);
+           TestMaxiCam_RequestedMode() == MAXICAM_MODE_AIM &&
+           TestMaxiCam_RequestCount() == 1U &&
+           TestMaxiCam_ModePending() &&
+           TestMaxiCam_ModeAttempts() == 0U && TestMaxiCam_ModeCount() == 0U);
+    /* The 0x80 notice releases the deferred byte, and only once. */
+    TestMaxiCam_PublishQrNotice();
+    assert(TestMaxiCam_LastMode() == MODE_CMD_AIM &&
+           TestMaxiCam_ModeCount() == 1U && TestMaxiCam_ModeAttempts() == 1U &&
+           !TestMaxiCam_ModePending());
+    TestMaxiCam_PublishQrNotice();
+    TestMaxiCam_PublishQrNotice();
+    assert(TestMaxiCam_ModeCount() == 1U && TestMaxiCam_ModeAttempts() == 1U);
     ShotControlFrame(c);
-    assert(TestMaxiCam_ModeCount() == 1U);
+    assert(TestMaxiCam_ModeCount() == 1U); /* Holding 1 does not restart. */
     c.Cam_T = 1; ShotControlFrame(c);
     c.Cam_T = 0; ShotControlFrame(c);
     assert(Car_Control_GetState() == CAR_SHOT_ALIGNING &&
@@ -111,7 +123,12 @@ static void TestShotBluetoothSwitch(void)
     assert(Car_Control_GetState() == CAR_RUNNING);
     c.forward = 0; c.Shot = 1; ShotControlFrame(c); Step(100U);
     assert(Car_Control_GetState() == CAR_SHOT_ALIGNING &&
-           TestMaxiCam_ModeCount() == 2U);
+           TestMaxiCam_RequestedMode() == MAXICAM_MODE_AIM &&
+           TestMaxiCam_RequestCount() == 2U &&
+           !TestMaxiCam_ModePending() && TestMaxiCam_ModeCount() == 1U);
+    /* Re-entering shot mode asks for the mode the camera already runs. */
+    TestMaxiCam_PublishQrNotice();
+    assert(TestMaxiCam_ModeCount() == 1U && TestMaxiCam_ModeAttempts() == 1U);
     c.Shot = 0; ShotControlFrame(c);
     assert(Car_Control_GetState() == CAR_WAIT_CENTER);
 
@@ -120,7 +137,7 @@ static void TestShotBluetoothSwitch(void)
     assert(Car_Control_GetState() == CAR_SHOT_ALIGNING);
     c = (BluetoothControlFrame){0}; ShotControlFrame(c);
     assert(Car_Control_GetState() == CAR_SHOT_ALIGNING);
-    puts("PASS SHOT switch: 1 enters, 0 exits to neutral remote, mode priority and PC1 independence");
+    puts("PASS SHOT switch: 1 enters, 0 exits to neutral remote, QR-released deferred mode, mode priority and PC1 independence");
 }
 
 static void TestShotEntryAndModes(void)
@@ -128,42 +145,88 @@ static void TestShotEntryAndModes(void)
     Reset(0U); Step(600U);
     ShotFrame(DETECT_TARGET, 0, 1U);
     pc1_low = 1U; Step(10U); pc1_low = 0U; Step(30U);
-    assert(TestMaxiCam_ModeAttempts() == 0U);
+    assert(TestMaxiCam_RequestCount() == 0U && TestMaxiCam_ModeAttempts() == 0U);
     ShotPress(); Step(100U);
-    assert(TestMaxiCam_LastMode() == MODE_CMD_AIM &&
-           TestMaxiCam_ModeCount() == 1U &&
+    /* PC1 entry only records the wish: the byte waits for a QR notice, and the
+     * mode step that keeps running in MaxiCam_Process() must not send it. */
+    TestMaxiCam_ModeStep();
+    assert(TestMaxiCam_RequestedMode() == MAXICAM_MODE_AIM &&
+           TestMaxiCam_RequestCount() == 1U && TestMaxiCam_ModePending() &&
+           TestMaxiCam_ModeAttempts() == 0U && TestMaxiCam_ModeCount() == 0U &&
+           TestMaxiCam_LastMode() == UINT8_MAX &&
            Car_Control_GetState() == CAR_SHOT_ALIGNING &&
            !Laser_IsEnabled());
+    TestMaxiCam_PublishQrNotice();
+    assert(TestMaxiCam_LastMode() == MODE_CMD_AIM &&
+           TestMaxiCam_ModeCount() == 1U && TestMaxiCam_ModeAttempts() == 1U &&
+           !TestMaxiCam_ModePending());
+    TestMaxiCam_PublishQrNotice();
+    TestMaxiCam_PublishQrNotice();
+    assert(TestMaxiCam_ModeCount() == 1U && TestMaxiCam_ModeAttempts() == 1U);
     Step(100U);
     assert(test_laser_enable_count == 0U); /* Pre-entry frame is discarded. */
     ShotRelease(); ShotPress();
-    assert(Car_Control_GetState() == CAR_OFF && !Laser_IsEnabled());
+    assert(Car_Control_GetState() == CAR_OFF && !Laser_IsEnabled() &&
+           TestMaxiCam_ModeCount() == 1U);
+
+    /* A failing byte no longer aborts the entry: the request stays pending, the
+     * caller stays in shot mode, and the retry transmits once the bus clears. */
     Reset(0U); Step(600U);
     TestMaxiCam_SetSendResult(HAL_BUSY);
     ShotPress(); Step(100U);
+    TestMaxiCam_ModeStep(); /* Still no notice: the request stays unserved. */
+    assert(Car_Control_GetState() == CAR_SHOT_ALIGNING &&
+           TestMaxiCam_RequestedMode() == MAXICAM_MODE_AIM &&
+           TestMaxiCam_ModePending() && TestMaxiCam_ModeAttempts() == 0U &&
+           TestMaxiCam_ModeCount() == 0U && !Laser_IsEnabled());
+    TestMaxiCam_PublishQrNotice();
     assert(TestMaxiCam_ModeAttempts() == 1U && TestMaxiCam_ModeCount() == 0U &&
-           Car_Control_GetState() == CAR_OFF);
-    ShotRelease(); TestMaxiCam_SetSendResult(HAL_OK); ShotPress(); Step(100U);
-    assert(TestMaxiCam_ModeAttempts() == 2U &&
-           Car_Control_GetState() == CAR_SHOT_ALIGNING);
+           TestMaxiCam_ModePending() && TestMaxiCam_LastMode() == UINT8_MAX &&
+           Car_Control_GetState() == CAR_SHOT_ALIGNING && !Laser_IsEnabled());
+    TestMaxiCam_SetSendResult(HAL_OK);
+    TestMaxiCam_ModeStep();
+    assert(TestMaxiCam_ModeAttempts() == 2U && TestMaxiCam_ModeCount() == 1U &&
+           TestMaxiCam_LastMode() == MODE_CMD_AIM &&
+           !TestMaxiCam_ModePending() &&
+           Car_Control_GetState() == CAR_SHOT_ALIGNING && !Laser_IsEnabled());
+    ShotRelease(); ShotPress();
+    assert(Car_Control_GetState() == CAR_OFF && !Laser_IsEnabled() &&
+           TestMaxiCam_ModeCount() == 1U);
+
     Reset(0U); Step(600U);
     TestMaxiCam_SetSendResult(HAL_ERROR);
-    VisionPress(); Step(40U);
-    assert(TestMaxiCam_ModeAttempts() == 1U &&
-           TestMaxiCam_ModeCount() == 0U && Car_Control_GetState() == CAR_OFF);
-    VisionRelease(); TestMaxiCam_SetSendResult(HAL_OK);
     VisionPress(); Step(100U);
+    TestMaxiCam_ModeStep(); /* Still no notice: the request stays unserved. */
+    assert(Car_Control_GetState() == CAR_VISION_TRACKING &&
+           TestMaxiCam_RequestedMode() == MAXICAM_MODE_OBJECT &&
+           TestMaxiCam_RequestCount() == 1U && TestMaxiCam_ModePending() &&
+           TestMaxiCam_ModeAttempts() == 0U && TestMaxiCam_ModeCount() == 0U);
+    TestMaxiCam_PublishQrNotice();
+    assert(TestMaxiCam_ModeAttempts() == 1U && TestMaxiCam_ModeCount() == 0U &&
+           TestMaxiCam_ModePending() && TestMaxiCam_LastMode() == UINT8_MAX &&
+           Car_Control_GetState() == CAR_VISION_TRACKING);
+    TestMaxiCam_SetSendResult(HAL_OK);
+    TestMaxiCam_ModeStep();
     assert(TestMaxiCam_LastMode() == MODE_CMD_OBJECT &&
-           TestMaxiCam_ModeCount() == 1U);
+           TestMaxiCam_ModeCount() == 1U && TestMaxiCam_ModeAttempts() == 2U &&
+           !TestMaxiCam_ModePending() &&
+           Car_Control_GetState() == CAR_VISION_TRACKING);
     ShotPress(); Step(100U);
+    assert(TestMaxiCam_RequestedMode() == MAXICAM_MODE_AIM &&
+           TestMaxiCam_ModePending() && TestMaxiCam_ModeCount() == 1U &&
+           Car_Control_GetState() == CAR_SHOT_ALIGNING);
+    TestMaxiCam_PublishQrNotice();
     assert(TestMaxiCam_LastMode() == MODE_CMD_AIM &&
-           TestMaxiCam_ModeCount() == 2U &&
+           TestMaxiCam_ModeCount() == 2U && !TestMaxiCam_ModePending() &&
            Car_Control_GetState() == CAR_SHOT_ALIGNING);
     VisionRelease(); VisionPress(); Step(100U);
+    assert(TestMaxiCam_RequestedMode() == MAXICAM_MODE_OBJECT &&
+           TestMaxiCam_ModePending() && TestMaxiCam_ModeCount() == 2U);
+    TestMaxiCam_PublishQrNotice();
     assert(TestMaxiCam_LastMode() == MODE_CMD_OBJECT &&
-           TestMaxiCam_ModeCount() == 3U &&
+           TestMaxiCam_ModeCount() == 3U && !TestMaxiCam_ModePending() &&
            Car_Control_GetState() == CAR_VISION_TRACKING);
-    puts("PASS Shot entry: PC1 debounce / camera commands / failed send / post-entry frames / mode switch");
+    puts("PASS Shot entry: PC1 debounce / deferred camera commands / QR release / failed send stays in vision / post-entry frames / mode switch");
 }
 
 static void StartShotFiring(void)
@@ -182,6 +245,10 @@ static void TestShotAimAndFire(void)
 {
     unsigned i, speed, stops;
     Reset(0U); Step(600U); ShotPress(); Step(100U);
+    /* The notice releases the deferred AIM byte; it must never be repeated. */
+    TestMaxiCam_PublishQrNotice();
+    assert(TestMaxiCam_LastMode() == MODE_CMD_AIM &&
+           TestMaxiCam_ModeCount() == 1U && !TestMaxiCam_ModePending());
     ShotFrame(DETECT_REDBALL, 0, 1U); Step(10U);
     assert(Car_Control_GetState() == CAR_SHOT_ALIGNING && !Laser_IsEnabled());
     ShotFrames(DETECT_TARGET, 11, 1U, 8U);

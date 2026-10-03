@@ -1,5 +1,5 @@
+#include "arm_trim_project.h"
 #include "arm_collision.h"
-#include "arm_config.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,9 +75,9 @@ static void TestProject(void)
         {1800U,1855U,528U}
     };
     unsigned i, j;
-    ArmCollision_ProjectModel(&m);
-    ArmKinematics_ProjectGeometry(&g);
-    ArmKinematics_ProjectCalibrations(c);
+    ArmTrimProject_Collision(&m);
+    ArmTrimProject_Geometry(&g);
+    ArmTrimProject_Calibrations(c);
     CHECK(m.enabled && ArmCollision_ModelValid(&m));
     CHECK(m.box_min[0] == -70.0f && m.box_max[0] == -30.0f);
     CHECK(fabsf(m.box_min[2]+31.2f) < 0.001f && fabsf(m.box_max[2]-38.8f) < 0.001f);

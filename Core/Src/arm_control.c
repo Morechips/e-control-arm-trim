@@ -1,4 +1,7 @@
+/* Legacy arm module: host tests only; excluded from the firmware image. */
 #include "arm_control.h"
+#include "servo.h"
+#include <stdio.h>
 #include <string.h>
 
 static bool initialized;
@@ -9,8 +12,6 @@ static bool step_sent;
 static uint32_t step_tick;
 static uint32_t service_tick;
 static size_t stop_joint;
-static void (*external_stop)(void *user);
-static void *external_user;
 
 static bool Active(void)
 {
@@ -62,7 +63,6 @@ ArmResult_t Arm_Configure(const ArmConfig_t *config)
     size_t i, j;
     bool any_enabled = false;
     if (!initialized) return ARM_NOT_CONFIGURED;
-    if (external_stop != NULL) return ARM_BUSY;
     if (Active()) return ARM_BUSY;
     if (status.state == ARM_FAULT) return ARM_FAULT_LATCHED;
     if (config == NULL) return ARM_INVALID_ARGUMENT;
@@ -90,10 +90,6 @@ ArmResult_t Arm_Configure(const ArmConfig_t *config)
 
 ArmResult_t Arm_SetMotionAllowed(bool allowed)
 {
-    if (external_stop != NULL) {
-        if (allowed) return ARM_BUSY;
-        return Arm_Stop();
-    }
     if (!allowed)
     {
         status.motion_allowed = false;
@@ -118,11 +114,10 @@ static bool StepValid(const ArmStep_t *step, bool original_preset)
     for (i = 0U; i < ARM_JOINT_COUNT; ++i)
     {
         const ArmJointConfig_t *joint = &configuration.joints[i];
-        const bool original_gripper = original_preset && i == ARM_JOINT_GRIPPER;
         if ((step->joint_mask & (1U << i)) == 0U) continue;
         if (!joint->enabled ||
-            step->position[i] < (original_gripper ? 500U : joint->min_position) ||
-            step->position[i] > (original_gripper ? 2500U : joint->max_position))
+            step->position[i] < (original_preset ? 500U : joint->min_position) ||
+            step->position[i] > (original_preset ? 2500U : joint->max_position))
             return false;
     }
     return true;
@@ -133,7 +128,6 @@ static ArmResult_t StartSequence(const ArmStep_t *steps, size_t count,
 {
     size_t i;
     if (!initialized || status.state == ARM_UNCONFIGURED) return ARM_NOT_CONFIGURED;
-    if (external_stop != NULL) return ARM_BUSY;
     if (Active()) return ARM_BUSY;
     if (status.state == ARM_FAULT) return ARM_FAULT_LATCHED;
     if (!status.motion_allowed) return ARM_INHIBITED;
@@ -146,7 +140,7 @@ static ArmResult_t StartSequence(const ArmStep_t *steps, size_t count,
     status.step_index = 0U;
     status.step_count = count;
     status.error = ARM_ERROR_NONE;
-    status.transport_result = ZLIS2_OK;
+    status.transport_result = SERVO_OK;
     status.stop_delivery_failed = false;
     status.state = ARM_RUNNING;
     step_sent = false;
@@ -164,16 +158,81 @@ ArmResult_t Arm_StartOriginalPreset(const ArmStep_t *step)
     return StartSequence(step, 1U, true);
 }
 
+static ArmResult_t StartUntimedPose(const uint16_t position[4],
+                                   uint16_t guard_ms)
+{
+    ArmStep_t step = {0};
+    ServoStatus_t tx_result;
+    char command[64];
+    size_t i;
+    int length;
+    if (!initialized || status.state == ARM_UNCONFIGURED) return ARM_NOT_CONFIGURED;
+    if (Active()) return ARM_BUSY;
+    if (status.state == ARM_FAULT) return ARM_FAULT_LATCHED;
+    if (!status.motion_allowed) return ARM_INHIBITED;
+    if (position == NULL) return ARM_INVALID_ARGUMENT;
+    step.joint_mask = 0x0FU;
+    for (i = 0U; i < 4U; ++i)
+    {
+        if (configuration.joints[i].servo_id != i) return ARM_INVALID_ARGUMENT;
+        step.position[i] = position[i];
+    }
+    step.move_ms = guard_ms;
+    if (!StepValid(&step, false)) return ARM_INVALID_ARGUMENT;
+    length = snprintf(command, sizeof(command),
+                      "{#000P%04uT%04u!#001P%04uT%04u!#002P%04uT%04u!#003P%04uT%04u!}",
+                      (unsigned)step.position[0], (unsigned)step.move_ms,
+                      (unsigned)step.position[1],
+                      (unsigned)step.move_ms, (unsigned)step.position[2],
+                      (unsigned)step.move_ms, (unsigned)step.position[3],
+                      (unsigned)step.move_ms);
+    if (length < 0 || (size_t)length >= sizeof(command))
+        return ARM_INVALID_ARGUMENT;
+    tx_result = Servo_SendRaw(command);
+    status.transport_result = tx_result;
+    if (tx_result != SERVO_OK)
+    {
+        status.motion_allowed = false;
+        status.state = ARM_FAULT;
+        status.error = ARM_ERROR_TRANSPORT;
+        status.step_count = 0U;
+        step_sent = false;
+        return ARM_FAULT_LATCHED;
+    }
+    sequence[0] = step;
+    status.step_index = 0U;
+    status.step_count = 1U;
+    status.error = ARM_ERROR_NONE;
+    status.stop_delivery_failed = false;
+    status.state = ARM_RUNNING;
+    step_sent = true;
+    step_tick = service_tick = HAL_GetTick();
+    return ARM_OK;
+}
+
+ArmResult_t Arm_StartResetPose(void)
+{
+    uint16_t pwm[4];
+    for (unsigned i = 0U; i < 4U; ++i) pwm[i] = codes[Servo_RST][i].pwm;
+    return StartUntimedPose(pwm, g_servo_legacy_reset_guard_ms);
+}
+
+ArmResult_t Arm_StartAimPose(void)
+{
+    uint16_t pwm[4];
+    for (unsigned i = 0U; i < 4U; ++i) pwm[i] = codes[Servo_AIM][i].pwm;
+    return StartUntimedPose(pwm, g_servo_legacy_aim_guard_ms);
+}
+
 ArmResult_t Arm_ResetController(void)
 {
-    ZLIS2_Status result;
+    ServoStatus_t result;
     if (!initialized || status.state == ARM_UNCONFIGURED) return ARM_NOT_CONFIGURED;
-    if (external_stop != NULL) return ARM_BUSY;
     if (Active() || status.motion_allowed) return ARM_BUSY;
     if (status.state == ARM_FAULT) return ARM_FAULT_LATCHED;
-    result = ZLIS2_Reset();
+    result = Servo_Reset();
     status.transport_result = result;
-    if (result != ZLIS2_OK)
+    if (result != SERVO_OK)
     {
         status.state = ARM_FAULT;
         status.error = ARM_ERROR_TRANSPORT;
@@ -187,11 +246,10 @@ ArmResult_t Arm_ResetController(void)
 
 ArmResult_t Arm_SendImmediate(const ArmStep_t *step)
 {
-    ZLIS2_ServoCommand commands[ARM_JOINT_COUNT];
-    ZLIS2_Status tx_result;
+    ServoCommand_t commands[ARM_JOINT_COUNT];
+    ServoStatus_t tx_result;
     size_t i, count = 0U;
     if (!initialized || status.state == ARM_UNCONFIGURED) return ARM_NOT_CONFIGURED;
-    if (external_stop != NULL) return ARM_BUSY;
     if (step == NULL || !StepValid(step, false)) return ARM_INVALID_ARGUMENT;
     for (i = 0U; i < ARM_JOINT_COUNT; ++i)
     {
@@ -201,9 +259,9 @@ ArmResult_t Arm_SendImmediate(const ArmStep_t *step)
         commands[count].time_ms = step->move_ms;
         ++count;
     }
-    tx_result = ZLIS2_SetServos(commands, count);
+    tx_result = Servo_SetCommands(commands, count);
     status.transport_result = tx_result;
-    if (tx_result != ZLIS2_OK)
+    if (tx_result != SERVO_OK)
     {
         status.motion_allowed = false;
         status.state = ARM_FAULT;
@@ -239,10 +297,6 @@ ArmResult_t Arm_MoveJoint(ArmJoint_t joint, uint16_t position,
 ArmResult_t Arm_Stop(void)
 {
     status.motion_allowed = false;
-    if (external_stop != NULL) {
-        external_stop(external_user);
-        return ARM_OK;
-    }
     if (!initialized || status.state == ARM_UNCONFIGURED) return ARM_NOT_CONFIGURED;
     if (status.state == ARM_STOPPING) return ARM_OK;
     status.state = ARM_STOPPING;
@@ -259,7 +313,7 @@ static void Fail(ArmError_t error)
 
 static void ProcessStop(void)
 {
-    ZLIS2_Status result;
+    ServoStatus_t result;
     while (stop_joint < ARM_JOINT_COUNT && !configuration.joints[stop_joint].enabled)
         ++stop_joint;
     if (stop_joint == ARM_JOINT_COUNT)
@@ -267,9 +321,9 @@ static void ProcessStop(void)
         status.state = status.error == ARM_ERROR_NONE ? ARM_CANCELLED : ARM_FAULT;
         return;
     }
-    result = ZLIS2_StopServo(configuration.joints[stop_joint].servo_id);
+    result = Servo_StopServo(configuration.joints[stop_joint].servo_id);
     ++stop_joint;
-    if (result != ZLIS2_OK)
+    if (result != SERVO_OK)
     {
         status.transport_result = result;
         status.stop_delivery_failed = true;
@@ -297,7 +351,7 @@ void Arm_Process(void)
     service_tick = now;
     if (!step_sent)
     {
-        ZLIS2_ServoCommand commands[ARM_JOINT_COUNT];
+        ServoCommand_t commands[ARM_JOINT_COUNT];
         const ArmStep_t *step = &sequence[status.step_index];
         size_t i, count = 0U;
         for (i = 0U; i < ARM_JOINT_COUNT; ++i)
@@ -308,8 +362,8 @@ void Arm_Process(void)
             commands[count].time_ms = step->move_ms;
             ++count;
         }
-        status.transport_result = ZLIS2_SetServos(commands, count);
-        if (status.transport_result != ZLIS2_OK)
+        status.transport_result = Servo_SetCommands(commands, count);
+        if (status.transport_result != SERVO_OK)
         {
             Fail(ARM_ERROR_TRANSPORT);
             return;
@@ -338,7 +392,7 @@ ArmResult_t Arm_ClearFault(void)
     if (Active()) return ARM_BUSY;
     if (status.state != ARM_FAULT) return ARM_INVALID_ARGUMENT;
     status.error = ARM_ERROR_NONE;
-    status.transport_result = ZLIS2_OK;
+    status.transport_result = SERVO_OK;
     status.stop_delivery_failed = false;
     status.motion_allowed = false;
     status.state = ARM_IDLE;
@@ -349,25 +403,4 @@ ArmStatus_t Arm_GetStatus(void)
 {
     return status;
 }
-
-ArmResult_t Arm_AcquireExternalMotion(void (*stop)(void *user), void *user)
-{
-    if (!initialized || status.state == ARM_UNCONFIGURED) return ARM_NOT_CONFIGURED;
-    if (stop == NULL || user == NULL) return ARM_INVALID_ARGUMENT;
-    if (external_stop != NULL || Active() || status.motion_allowed) return ARM_BUSY;
-    if (status.state == ARM_FAULT) return ARM_FAULT_LATCHED;
-    external_stop = stop;
-    external_user = user;
-    return ARM_OK;
-}
-
-ArmResult_t Arm_ReleaseExternalMotion(void *user)
-{
-    if (external_stop == NULL || external_user != user) return ARM_INVALID_ARGUMENT;
-    external_stop = NULL;
-    external_user = NULL;
-    return ARM_OK;
-}
-
-bool Arm_ExternalMotionOwned(void) { return external_stop != NULL; }
 

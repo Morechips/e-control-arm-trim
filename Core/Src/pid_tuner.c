@@ -1,3 +1,4 @@
+#include "uart_tx_queue.h"
 #include "pid_tuner.h"
 #include "heading_control.h"
 #include <math.h>
@@ -5,12 +6,11 @@
 #include <string.h>
 
 static PID_TunerStatus status;
-static char replies[PID_REPLY_QUEUE_SIZE][PID_TX_LINE_SIZE];
+static uint8_t replies[PID_REPLY_QUEUE_SIZE][PID_TX_LINE_SIZE];
 static uint16_t lengths[PID_REPLY_QUEUE_SIZE];
-static uint8_t head, tail, count;
-static char transmitting[PID_TX_LINE_SIZE];
-static volatile uint8_t active;
-static uint32_t tx_tick, debug_tick;
+static uint8_t transmitting[PID_TX_LINE_SIZE];
+static UartTxQueue_t tx;
+static uint32_t debug_tick;
 
 /* Integer-only printf: newlib-nano float printf need not be enabled.
  * Scientific notation only for values too large for safe scaled uint32.
@@ -37,24 +37,29 @@ static void Fixed(char *out, float value, unsigned int digits)
     if (length<0 || length>=24) (void)snprintf(out,24U,"NA");
 }
 
+static void TxEvent(UartTxQueue_t *q, UartQueueEvent_t event, const uint8_t *data,
+                    uint16_t length, uint32_t tag, HAL_StatusTypeDef result)
+{
+    (void)q; (void)data; (void)length; (void)tag; (void)result;
+    if (event == UART_QUEUE_START_FAILED || event == UART_QUEUE_TIMED_OUT) ++status.tx_errors;
+}
 static void Queue(const char *line, int length)
 {
-    if (length<=0 || (size_t)length>=PID_TX_LINE_SIZE || count==PID_REPLY_QUEUE_SIZE) {
+    if (length <= 0 || (size_t)length >= PID_TX_LINE_SIZE ||
+        UART_TxQueue_Submit(&tx, (const uint8_t *)line, (size_t)length, 0U) != HAL_OK)
         ++status.replies_dropped;
-        return;
-    }
-    memcpy(replies[head],line,(size_t)length);
-    lengths[head]=(uint16_t)length;
-    head=(uint8_t)((head+1U)%PID_REPLY_QUEUE_SIZE);
-    ++count;
 }
-
 void PID_Tuner_Init(void)
 {
     memset(&status,0,sizeof(status));
     status.step_mode=PID_STEP_COARSE;
-    head=tail=count=active=0U;
-    tx_tick=debug_tick=HAL_GetTick();
+    const UartTxQueueConfig_t config = {
+        .policy = UART_QUEUE_FIFO, .capacity = PID_REPLY_QUEUE_SIZE, .frame_size = PID_TX_LINE_SIZE,
+        .timeout_ms = PID_TX_TIMEOUT_MS, .timeout_inclusive = 1U,
+        .abort_failure_keeps_active = 1U, .retain_failed = 1U, .notify = TxEvent
+    };
+    (void)UART_TxQueue_Init(&tx, &huart6, &config, &replies[0][0], lengths, NULL, transmitting);
+    debug_tick=HAL_GetTick();
 }
 
 bool PID_Tuner_QueueReply(const char *line)
@@ -62,7 +67,7 @@ bool PID_Tuner_QueueReply(const char *line)
     size_t length;
     if (line == NULL) return false;
     for (length = 0U; length < PID_TX_LINE_SIZE && line[length] != '\0'; ++length) {}
-    if (length == 0U || length == PID_TX_LINE_SIZE || count == PID_REPLY_QUEUE_SIZE) {
+    if (length == 0U || length == PID_TX_LINE_SIZE || UART_TxQueue_Free(&tx) == 0U) {
         ++status.replies_dropped;
         return false;
     }
@@ -119,35 +124,17 @@ void PID_Tuner_HandleCommand(uint8_t cmd)
 
 void PID_Tuner_TxCallback(UART_HandleTypeDef *uart)
 {
-    if (uart==&huart6) active=0U;
+    if (uart == &huart6) UART_TxQueue_Complete(&tx);
 }
-
-static HAL_StatusTypeDef Start(const char *line, uint16_t length)
-{
-    HAL_StatusTypeDef result;
-    memcpy(transmitting,line,length);
-    tx_tick=HAL_GetTick();
-    active=1U; /* Set before starting: completion may interrupt this call. */
-    result=HAL_UART_Transmit_IT(&huart6,(const uint8_t *)transmitting,length);
-    if (result!=HAL_OK) { active=0U; ++status.tx_errors; }
-    return result;
-}
-
 void PID_Tuner_Process(void)
 {
     uint32_t now=HAL_GetTick();
     bool debug_due=status.debug_enabled && (uint32_t)(now-debug_tick)>=PID_DEBUG_INTERVAL_MS;
-    if (active && (uint32_t)(now-tx_tick)>=PID_TX_TIMEOUT_MS) {
-        /* TX-only abort: never stop the joystick RX interrupt. No DMA here. */
-        if (HAL_UART_AbortTransmit(&huart6)!=HAL_OK) return;
-        active=0U; ++status.tx_errors;
-    }
-    if (debug_due) debug_tick=now; /* No backlog or catch-up burst. */
-    if (active || count!=0U) {
+    uint8_t replies_due = (uint8_t)(UART_TxQueue_Pending(&tx) != 0U);
+    if (UART_TxQueue_Process(&tx) != HAL_OK && UART_TxQueue_IsSending(&tx)) return;
+    if (debug_due) debug_tick=now;
+    if (replies_due || !UART_TxQueue_IsIdle(&tx)) {
         if (debug_due) ++status.debug_skipped;
-        if (!active && Start(replies[tail],lengths[tail])==HAL_OK) {
-            tail=(uint8_t)((tail+1U)%PID_REPLY_QUEUE_SIZE); --count;
-        }
         return;
     }
     if (debug_due) {
@@ -160,6 +147,11 @@ void PID_Tuner_Process(void)
         Fixed(p,pid->kp,3U); Fixed(i,pid->ki,3U); Fixed(d,pid->kd,3U);
         length=snprintf(line,sizeof(line),"CTRL T=%s A=%s E=%s O=%s P=%s I=%s D=%s\r\n",t,a,e,o,p,i,d);
         if (length<=0 || (size_t)length>=sizeof(line) ||
-            Start(line,(uint16_t)length)!=HAL_OK) ++status.debug_skipped;
+            UART_TxQueue_Submit(&tx, (const uint8_t *)line, (size_t)length, 0U) != HAL_OK) {
+            ++status.debug_skipped;
+        } else if (UART_TxQueue_Process(&tx) != HAL_OK) {
+            UART_TxQueue_CancelPending(&tx, 0U);
+            ++status.debug_skipped;
+        }
     }
 }

@@ -6,7 +6,7 @@
 /* PC3 is high impedance while inactive and sinks the active-low trigger. */
 void Laser_Init(void);
 /* Poll PB8 in the foreground; press is debounced, release is immediate. */
-void Laser_ProcessButton(void);
+void Laser_SetManualRequest(bool requested);
 /* These functions set and clear only the automatic task request. */
 void Laser_Enable(void);
 void Laser_Disable(void);

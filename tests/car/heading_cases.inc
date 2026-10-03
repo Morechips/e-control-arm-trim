@@ -19,71 +19,67 @@ static int16_t LatestSpeed(uint8_t address)
 }
 static void TestHeadingIntegration(void)
 {
+    BluetoothControlFrame c = {0};
     unsigned before;
-    const int16_t vx=CAR_HEADING_TEST_MODE ? 3 : 50;
-    Reset(0);Ready();ImuSample(20,0);Frame(0,0,0,100);
-    assert(Heading_GetStatus()->reference_valid && Heading_GetStatus()->yaw_zero>19.9f);
-    assert(Heading_GetStatus()->target==0.0f && Heading_GetStatus()->actual==0.0f);
-    Frame(0,0,0,100);ImuSample(29.01f,0);Loop();Step(40);
-    assert(Heading_GetStatus()->omega_final==4);
-    {
-        const int16_t applied = CAR_HEADING_TEST_MODE ? 1 : 4;
-        assert(LatestSpeed(1)==-(vx-applied) && LatestSpeed(2)==vx+applied);
-        assert(LatestSpeed(3)==vx+applied && LatestSpeed(4)==-(vx-applied));
+    float integral;
+    Reset(0U); Ready(); ImuSample(20,0); Loop();
+    ImuSample(22,0); c.forward = 1; ControlFrame(c); Step(40U);
+    assert(RemoteHeading_GetStatus()->phase == REMOTE_ALIGNING);
+    assert(LatestSpeed(1) == 1 && LatestSpeed(2) == 1);
+    assert(Heading_SetPID(1,2,0));
+    ImuSample(23,0); Loop(); integral = Heading_GetIntegralOutput();
+    Step(40U); assert(Heading_GetIntegralOutput() == integral);
+    ImuSample(20.4f,0); Loop(); Step(40U);
+    assert(RemoteHeading_GetStatus()->phase == REMOTE_ALIGNED);
+    AssertLatestPhysicalSpeed(1U,-BLUETOOTH_TEST_MOVE_RPM);
+    AssertLatestPhysicalSpeed(2U,BLUETOOTH_TEST_MOVE_RPM);
+    ImuSample(24,0); Loop(); Step(40U);
+    assert(RemoteHeading_GetStatus()->phase == REMOTE_DRIFTING);
+    before = Count(0xFE); Step(JY61_TIMEOUT_MS + 1U); Step(40U);
+    assert(RemoteHeading_GetStatus()->phase == REMOTE_NO_IMU && Count(0xFE) == before);
+    AssertLatestPhysicalSpeed(1U,-BLUETOOTH_TEST_MOVE_RPM);
+    AssertLatestPhysicalSpeed(2U,BLUETOOTH_TEST_MOVE_RPM);
+    ImuSample(24,0); ControlFrame(c); Step(40U);
+    assert(RemoteHeading_GetStatus()->phase == REMOTE_DRIFTING);
+    c.forward = 0; c.stop = 1; ControlFrame(c); Step(40U);
+    assert(Car_Control_GetState() == CAR_BRAKE_LOCK);
+    assert(Car_Control_AdjustTargetYaw(5) == HAL_ERROR);
+    puts("PASS remote heading integration: pre-motion gate, mixed correction while driving, IMU fallback/recovery and STOP");
+}
+
+static void TestManualReleaseBrakesHeading(void)
+{
+    BluetoothControlFrame c = {0};
+    unsigned before;
+    Reset(0U); Ready(); ImuSample(0,0); Loop();
+    c.forward = 1; ControlFrame(c); Step(30U);
+    c.forward = 0; ControlFrame(c); Step(40U);
+    assert(Car_Control_GetState() == CAR_READY);
+    before = Count(0xF6); ImuSample(2,0); Loop(); Step(40U);
+    assert(Car_Control_GetState() == CAR_RUNNING && Count(0xF6) > before);
+    assert(RemoteHeading_GetStatus()->phase == REMOTE_ALIGNING);
+    ImuSample(0.4f,0); Loop(); Step(40U);
+    assert(Car_Control_GetState() == CAR_READY);
+    puts("PASS idle heading: button release retains heading; disturbance aligns, deadband brakes");
+}
+
+static void TestRemoteReferenceLifetime(void)
+{
+    BluetoothControlFrame c = {0};
+    unsigned i;
+    Reset(0U); Ready(); ImuSample(0,0); Loop();
+    for (i=1U; i<=4U; ++i) {
+        c.right_90 = 1; ControlFrame(c); Step(30U);
+        assert(Car_Control_GetState() == CAR_TURNING);
+        FinishRemoteTurn(c, -90.0f * (float)i);
+        assert(RemoteHeading_GetStatus()->direction == (RemoteDirection_t)(i % 4U));
+        c.right_90 = 0; ControlFrame(c); Step(20U);
     }
-    /* Stale IMU removes only yaw correction; translation remains controllable. */
-    before=Count(0xFE);Step(102);Step(30);
-    assert(Heading_GetStatus()->state==HEADING_FAULT && Heading_GetStatus()->omega_final==0);
-    assert(Count(0xFE)==before);
-    assert(LatestSpeed(1)==-vx && LatestSpeed(2)==vx && LatestSpeed(3)==vx && LatestSpeed(4)==-vx);
-    Frame(1,0,0,100);Step(30);ImuSample(29,0);Loop();
-    assert(Car_Control_GetState()==CAR_BRAKE_LOCK && Heading_GetStatus()->omega_final==0);
-    assert(Car_Control_AdjustTargetYaw(ANGLE_ADJUST_STEP_DEG)==HAL_ERROR && !Heading_RequestReference());
-    before=Count(0xF6);Frame(0,0,0,100);Step(30);assert(Count(0xF6)==before);
-    Frame(0,0,0,0);Step(30);assert(Car_Control_GetState()!=CAR_BRAKE_LOCK);
-    puts("PASS heading integration: software zero / translation+bounded correction / IMU fallback / brake lock");
-}
-static void TestJoystickCenterBrakesHeading(void)
-{
-    unsigned speed_frames, brake_frames;
-    Reset(0); Ready();
-    ImuSample(20.0f,0.0f);
-    Frame(0,0,0,600);
-    assert(Heading_SetPID(1.0f,2.0f,0.0f));
-    Step(20);
-    ImuSample(30.0f,0.0f);
-    Step(20);
-    assert(Heading_GetStatus()->yaw_error < -9.0f);
-    assert(Heading_GetIntegralOutput() < 0.0f);
-    assert(Heading_GetStatus()->omega_final != 0);
-    speed_frames=Count(0xF6);
-    brake_frames=Count(0xFE);
-    Frame(0,0,0,0);
-    Step(40);
-    assert(Car_Control_GetState()==CAR_READY);
-    assert(Count(0xFE)==brake_frames+4U);
-    assert(Count(0xF6)==speed_frames);
-    assert(Heading_GetIntegralOutput()==0.0f);
-    assert(Heading_GetStatus()->omega_final==0);
-    assert(Heading_GetStatus()->omega_correction==0.0f);
-    Step(80);
-    assert(Count(0xF6)==speed_frames);
-    puts("PASS joystick center: heading correction and integral cleared / immediate brake / no spin command");
-}
-static void TestHeadingMailbox(void)
-{
-    Reset(0);heading_test_action=1;++heading_test_request;Loop();Ready();ImuSample(20,0);Frame(0,0,0,100);
-    assert(Heading_GetStatus()->target==0.0f); /* rejected request not replayed */
-    heading_test_action=1;++heading_test_request;Loop();
-    assert(Heading_GetStatus()->angle_adjusting && Heading_GetStatus()->target==ANGLE_ADJUST_STEP_DEG);
-    assert(Heading_GetStatus()->omega_final==-2);
-    Step(10);ImuSample(25,0);Loop();
-    assert(Heading_GetStatus()->state==HEADING_HOLD && Heading_GetStatus()->target==ANGLE_ADJUST_STEP_DEG);
-    Frame(0,0,0,100);Step(30);
-    assert(Heading_GetStatus()->target==ANGLE_ADJUST_STEP_DEG); /* Translation preserves adjusted target. */
-    heading_test_action=3;++heading_test_request;Loop();
-    assert(Heading_GetStatus()->target==0.0f && Heading_GetStatus()->actual==0.0f);
-    heading_test_action=0;++heading_test_request;Loop();
-    assert(Car_Control_GetState()==CAR_BRAKE_LOCK && Heading_GetStatus()->omega_final==0);
-    puts("PASS heading mailbox: denied request consumed / +/-5 target / target persistence / software re-zero / STOP lock");
+    assert(mock_reset_count == 0U);
+    Step(BT_FAILSAFE_TIMEOUT_MS + 1U);
+    assert(Car_Control_GetState() == CAR_LINK_LOST && !RemoteHeading_GetStatus()->reference_valid);
+    ImuSample(40,0); ControlFrame(c); Step(40U); ControlFrame(c); Step(40U); ControlFrame(c); Step(40U);
+    assert(Car_Control_GetState() == CAR_READY && RemoteHeading_GetStatus()->direction == REMOTE_FRONT);
+    assert(fabsf(RemoteHeading_GetStatus()->reference_yaw - 40) < 0.01f);
+    puts("PASS remote direction cycle: four right turns return FRONT, no Z reset, reconnect creates a new reference");
 }

@@ -6,11 +6,7 @@ static void FlushBT(void)
 static void Tune(uint8_t cmd)
 {
     const uint8_t packet[]={0xA5,cmd,0,cmd,0x5A};
-    const uint8_t release[]={0xA5,0,0,0,0,0,0x5A};
-    /* A complete following frame supplies an unambiguous boundary without
-     * advancing the car/PID timing tests. Neither frame refreshes car RX. */
-    Inject(&huart6,packet,sizeof(packet)); Inject(&huart6,release,sizeof(release));
-    Bluetooth_Process(); Bluetooth_Process();
+    Inject(&huart6,packet,sizeof(packet)); Bluetooth_Process();
 }
 static void ExpectBT(const char *line)
 {
@@ -19,10 +15,10 @@ static void ExpectBT(const char *line)
 static void TestTunerCommands(void)
 {
     unsigned n,i; uint32_t stamp,seq;
+    /* Compare stored float defaults; x87 may retain literal excess precision. */
+    const HeadingPIDParameters defaults = {HEADING_KP,HEADING_KI,HEADING_KD};
     Reset(0);assert(bt_sent_count==0 && !PID_Tuner_GetStatus()->debug_enabled);
-    assert(fabsf(Heading_GetPID()->kp-0.5f)<0.000001f &&
-           Heading_GetPID()->ki==0 &&
-           fabsf(Heading_GetPID()->kd-0.05f)<0.000001f);
+    assert(Heading_GetPID()->kp==defaults.kp && Heading_GetPID()->ki==defaults.ki && Heading_GetPID()->kd==defaults.kd);
     assert(Heading_SetPID(1,0,0)); stamp=Bluetooth_GetLastRxTick();seq=Bluetooth_GetSequence();
     Tune(1);ExpectBT("PID P=1.100 I=0.000 D=0.000 STEP=COARSE\r\n");
     Tune(2);ExpectBT("PID P=1.000 I=0.000 D=0.000 STEP=COARSE\r\n");
@@ -43,9 +39,7 @@ static void TestTunerCommands(void)
     assert(Heading_GetPID()->kp==FLT_MAX); /* Formatting adds no gain limit. */
     n=bt_sent_count;Tune(0);Tune(12);PID_Tuner_HandleCommand(255);FlushBT();assert(bt_sent_count==n);
     Heading_Init();PID_Tuner_Init();
-    assert(fabsf(Heading_GetPID()->kp-HEADING_KP)<0.000001f &&
-           fabsf(Heading_GetPID()->ki-HEADING_KI)<0.000001f &&
-           fabsf(Heading_GetPID()->kd-HEADING_KD)<0.000001f);
+    assert(Heading_GetPID()->kp==defaults.kp && Heading_GetPID()->ki==defaults.ki && Heading_GetPID()->kd==defaults.kd);
     assert(PID_Tuner_GetStatus()->step_mode==PID_STEP_COARSE && !PID_Tuner_GetStatus()->debug_enabled);
     puts("PASS tuner: all 11 commands / coarse-fine steps / query / negative clamp / RAM defaults / finite gains / integer formatting");
 }
@@ -55,16 +49,14 @@ static void TestTunerFraming(void)
     unsigned i;uint32_t seq;
     Reset(0);assert(Heading_SetPID(1,0,0));seq=Bluetooth_GetSequence();
     for(i=0;i<4;i++){Inject(&huart6,tune+i,1);Bluetooth_Process();assert(Heading_GetPID()->kp==1);}
-    Inject(&huart6,tune+4,1);Bluetooth_Process();assert(Heading_GetPID()->kp==1);
-    now+=BT_FRAME_GAP_TIMEOUT_MS+1U;Bluetooth_Process();assert(fabsf(Heading_GetPID()->kp-1.1f)<0.00001f);
+    Inject(&huart6,tune+4,1);Bluetooth_Process();assert(fabsf(Heading_GetPID()->kp-1.1f)<0.00001f);
     assert(Bluetooth_GetSequence()==seq && !Bluetooth_GetControl()->valid);
     Pack(joy,1,0,1000,-1000);
     memcpy(mixed,tune,5);memcpy(mixed+5,joy,sizeof(joy));memcpy(mixed+5+sizeof(joy),tune,5);
     Inject(&huart6,mixed,sizeof(mixed));Bluetooth_Process();assert(Bluetooth_GetSequence()==seq);
     Bluetooth_Process();assert(Bluetooth_GetSequence()==seq+1 && Bluetooth_GetControl()->frame.stop);
-    Bluetooth_Process();now+=BT_FRAME_GAP_TIMEOUT_MS+1U;Bluetooth_Process();assert(fabsf(Heading_GetPID()->kp-1.3f)<0.00001f);
+    Bluetooth_Process();assert(fabsf(Heading_GetPID()->kp-1.3f)<0.00001f);
     memcpy(bad,tune,5);bad[3]=2;Inject(&huart6,bad,5);Inject(&huart6,tune,5);Bluetooth_Process();
-    now+=BT_FRAME_GAP_TIMEOUT_MS+1U;Bluetooth_Process();
     assert(fabsf(Heading_GetPID()->kp-1.4f)<0.00001f);
     Inject(&huart6,tune,2);Bluetooth_Process();now+=BT_FRAME_GAP_TIMEOUT_MS+1;
     Inject(&huart6,tune+2,3);Bluetooth_Process();assert(fabsf(Heading_GetPID()->kp-1.4f)<0.00001f);
@@ -78,7 +70,7 @@ static void TestTunerFraming(void)
     assert(fabsf(Heading_GetPID()->kp-1.4f)<0.00001f);
     Inject(&huart6,tune,2);Bluetooth_Process();HAL_UART_ErrorCallback(&huart6);Bluetooth_Process();
     Inject(&huart6,tune+2,3);Bluetooth_Process();assert(fabsf(Heading_GetPID()->kp-1.4f)<0.00001f);
-    Inject(&huart6,tune,5);Bluetooth_Process();now+=BT_FRAME_GAP_TIMEOUT_MS+1U;Bluetooth_Process();assert(fabsf(Heading_GetPID()->kp-1.5f)<0.00001f);
+    Inject(&huart6,tune,5);Bluetooth_Process();assert(fabsf(Heading_GetPID()->kp-1.5f)<0.00001f);
     /* A full control frame never changes PID gains or command framing. */
     Pack(joy,0,0,1000,1);
     seq=Bluetooth_GetSequence();Inject(&huart6,joy,sizeof(joy));Bluetooth_Process();
@@ -93,7 +85,7 @@ static unsigned CountCTRL(void)
 static void TestTunerTransport(void)
 {
     unsigned i,n;uint32_t start;
-    Reset(0);Tune(9);next_bt_tx_result=HAL_BUSY;PID_Tuner_Process();
+    Reset(0);assert(Heading_SetPID(0.5f,0,0.05f));Tune(9);next_bt_tx_result=HAL_BUSY;PID_Tuner_Process();
     assert(bt_sent_count==0 && PID_Tuner_GetStatus()->tx_errors==1);
     PID_Tuner_Process();assert(bt_sent_count==1);FlushBT();
     Tune(10);ExpectBT("PID DEBUG=ON\r\n");start=now;
@@ -104,7 +96,7 @@ static void TestTunerTransport(void)
         assert((uint32_t)(bt_ticks[i]-start)%100U==0);
     Tune(11);n=CountCTRL();Step(300);assert(CountCTRL()==n);
     /* Immutable in-flight buffer, bounded response queue, no wait on TX. */
-    Reset(0);Tune(9);PID_Tuner_Process();stall_bt=1;
+    Reset(0);assert(Heading_SetPID(0.5f,0,0.05f));Tune(9);PID_Tuner_Process();stall_bt=1;
     for(i=0;i<20;i++) Tune(1);
     assert(PID_Tuner_GetStatus()->replies_dropped==12);
     assert(fabsf(Heading_GetPID()->kp-2.5f)<0.0001f);
@@ -121,8 +113,8 @@ static void TestTunerTransport(void)
 static void TestTunerSafety(void)
 {
     unsigned i,n,before;uint32_t first=0,last=0;bool seen=false;
-    Reset(0);Ready();Tune(10);Loop();Frame(0,0,0,100);
-    for(i=0;i<20;i++){Step(20);Frame(0,0,0,100);}
+    Reset(0);Ready();Tune(10);Loop();ButtonFrame(0,0,1);
+    for(i=0;i<20;i++){Step(20);ButtonFrame(0,0,1);}
     assert(CountCTRL()>0 && Car_Control_GetState()==CAR_RUNNING);
     for(i=0;i<sent_count;i++) if(sent[i].bytes[0]==1 && sent[i].bytes[1]==0xF6) {
         if(seen) assert((uint32_t)(sent[i].tick-last)>=CAR_CONTROL_PERIOD_MS &&
@@ -131,20 +123,20 @@ static void TestTunerSafety(void)
         last=sent[i].tick;seen=true;
     }
     assert(seen && (uint32_t)(last-first)>=300U);
-    Frame(1,0,0,100);assert(Car_Control_GetState()==CAR_BRAKE_LOCK);Step(30);
+    ButtonFrame(1,0,1);assert(Car_Control_GetState()==CAR_BRAKE_LOCK);Step(30);
     before=Count(0xF6);
     for(i=1;i<=11;i++){Tune((uint8_t)i);Loop();}
-    Frame(0,0,0,100);Step(30);
+    ButtonFrame(0,0,1);Step(30);
     assert(Car_Control_GetState()==CAR_BRAKE_LOCK && Count(0xF6)==before);
     assert(!Heading_RequestReference() && Heading_GetStatus()->omega_final==0);
-    Frame(0,0,0,0);Step(30);assert(Car_Control_GetState()==CAR_READY);
+    ButtonFrame(0,0,0);Step(30);assert(Car_Control_GetState()==CAR_READY);
     /* Parameter traffic must not keep the motion link alive. */
-    Frame(0,0,0,100);Step(30);n=Count(0xFE);
+    ButtonFrame(0,0,1);Step(30);n=Count(0xFE);
     for(i=0;i<6;i++){Tune(9);Step(100);}
     assert(Car_Control_GetState()==CAR_LINK_LOST && Count(0xFE)==n+4);
     /* Saturated Bluetooth TX never blocks an immediate brake packet. */
-    Reset(0);Ready();Frame(0,0,0,100);Step(30);stall_bt=1;Tune(9);Loop();
+    Reset(0);Ready();ButtonFrame(0,0,1);Step(30);stall_bt=1;Tune(9);Loop();
     for(i=0;i<20;i++) Tune(9);
-    Frame(1,0,0,100);assert(Car_Control_GetState()==CAR_BRAKE_LOCK);
+    ButtonFrame(1,0,1);assert(Car_Control_GetState()==CAR_BRAKE_LOCK);
     puts("PASS tuner safety: DEBUG with original 20ms motor period / brake-center latch / no keepalive / TX congestion brake");
 }

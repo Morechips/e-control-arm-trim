@@ -68,6 +68,18 @@ ArmTrimResult_t ArmTrim_Init(ArmTrim_t *t, const ArmTrimConfig_t *c, const ArmTr
     return ARM_TRIM_OK;
 }
 
+ArmTrimResult_t ArmTrim_SetAsyncIO(ArmTrim_t *t, const ArmTrimAsyncIO_t *async)
+{
+    if (t == NULL || !t->configured) return ARM_TRIM_INVALID;
+    if (Active(t)) return ARM_TRIM_BUSY;
+    if (async != NULL && (async->poll == NULL || async->cancel_pending == NULL))
+        return ARM_TRIM_INVALID;
+    if (async == NULL) memset(&t->async_io, 0, sizeof(t->async_io));
+    else t->async_io = *async;
+    t->tx_pending = t->stop_waiting = false;
+    return ARM_TRIM_OK;
+}
+
 static ArmTrimResult_t Forward(const ArmTrim_t *t, const uint16_t p[3], ArmPose2D_t *pose,
                               ArmJointAngles_t *q)
 {
@@ -135,9 +147,14 @@ ArmTrimResult_t ArmTrim_Synchronize(ArmTrim_t *t, const uint16_t p[3])
     ArmJointAngles_t q;
     uint16_t previous[3], candidate[3];
     int direction;
-    if (t == NULL || !t->configured || p == NULL) return ARM_TRIM_INVALID;
+    if (t == NULL || !t->configured) return ARM_TRIM_INVALID;
     if (Active(t)) return ARM_TRIM_BUSY;
     if (t->status.state == ARM_TRIM_FAULT) return ARM_TRIM_FAULT_LATCHED;
+    /* A replacement assertion invalidates the previous estimate even when its
+     * P values or model checks fail. Never continue from a stale reference. */
+    t->status.reference_valid = false;
+    t->status.state = ARM_TRIM_IDLE;
+    if (p == NULL) return ARM_TRIM_INVALID;
     if (Forward(t, p, &pose, &q) != ARM_TRIM_OK) return ARM_TRIM_OUT_OF_RANGE;
     if (fabsf(sinf(q.q1_rad)) < t->config.min_elbow_sine) return ARM_TRIM_PATH_INVALID;
     memset(&t->status, 0, sizeof(t->status));
@@ -343,6 +360,8 @@ ArmTrimResult_t ArmTrim_Cancel(ArmTrim_t *t)
     t->status.state = ARM_TRIM_STOPPING;
     t->status.stop_failed = false;
     t->stop_index = 0U;
+    t->stop_waiting = false;
+    if (t->async_io.cancel_pending != NULL) t->async_io.cancel_pending(t->io.user);
     return ARM_TRIM_OK;
 }
 
@@ -365,12 +384,81 @@ static void SendSegment(ArmTrim_t *t, uint32_t now)
     /* Start-to-start cadence includes UART TX time. Waiting T after TX and
      * then sending the next frame used to add a transmission gap every step. */
     t->dispatch_tick = now;
+    t->tx_tick = now;
     if (!t->io.send(t->io.user, segment->position, segment->move_ms)) {
         Fail(t, ARM_TRIM_TRANSPORT); return;
     }
     t->segment_tick = t->io.now(t->io.user);
     t->service_tick = t->segment_tick;
     t->segment_sent = true;
+    t->tx_pending = t->async_io.poll != NULL;
+}
+
+/* Poll one accepted transfer. Timestamps must describe the actual frame and
+ * remain within the bounded acceptance-to-TC window, including tick wrap. */
+static ArmTrimTxState_t PollTransfer(ArmTrim_t *t, uint32_t now,
+                                   uint32_t *started, uint32_t *completed,
+                                   bool *timed_out)
+{
+    ArmTrimTxState_t result = t->async_io.poll(t->io.user, started, completed);
+    *timed_out = false;
+    if (result == ARM_TRIM_TX_COMPLETE) {
+        if ((uint32_t)(*started - t->tx_tick) > t->config.service_timeout_ms ||
+            (uint32_t)(*completed - *started) > t->config.service_timeout_ms ||
+            (uint32_t)(*completed - t->tx_tick) > t->config.service_timeout_ms ||
+            (uint32_t)(now - *completed) >= UINT32_C(0x80000000)) {
+            *timed_out = true;
+            return ARM_TRIM_TX_FAILED;
+        }
+    } else if (result == ARM_TRIM_TX_PENDING &&
+               (uint32_t)(now - t->tx_tick) > t->config.service_timeout_ms) {
+        *timed_out = true;
+        return ARM_TRIM_TX_FAILED;
+    } else if (result != ARM_TRIM_TX_PENDING && result != ARM_TRIM_TX_FAILED) {
+        return ARM_TRIM_TX_FAILED;
+    }
+    return result;
+}
+
+static void StopFailure(ArmTrim_t *t, bool timed_out)
+{
+    t->status.stop_failed = true;
+    if (t->status.error == ARM_TRIM_OK)
+        t->status.error = timed_out ? ARM_TRIM_SERVICE_TIMEOUT : ARM_TRIM_TRANSPORT;
+}
+
+static void ProcessStopping(ArmTrim_t *t)
+{
+    if (t->async_io.poll != NULL && t->tx_pending) {
+        uint32_t started = 0U, completed = 0U;
+        bool timed_out;
+        ArmTrimTxState_t result = PollTransfer(t, t->io.now(t->io.user),
+                                              &started, &completed, &timed_out);
+        if (result == ARM_TRIM_TX_PENDING) return;
+        t->tx_pending = false;
+        /* A canceled move can fail because its pending queue item was removed;
+         * it is not a failed stop. A stuck transfer still faults and is bounded. */
+        if (timed_out) {
+            t->async_io.cancel_pending(t->io.user);
+            StopFailure(t, true);
+        } else if (t->stop_waiting && result == ARM_TRIM_TX_FAILED) {
+            StopFailure(t, false);
+        }
+        if (t->stop_waiting) ++t->stop_index;
+        t->stop_waiting = false;
+        return;
+    }
+    if (t->stop_index >= 3U) {
+        t->status.state = t->status.error == ARM_TRIM_OK ? ARM_TRIM_CANCELLED : ARM_TRIM_FAULT;
+        return;
+    }
+    t->tx_tick = t->io.now(t->io.user);
+    if (!t->io.stop(t->io.user, t->stop_index)) {
+        StopFailure(t, false);
+        ++t->stop_index;
+    } else if (t->async_io.poll != NULL) {
+        t->tx_pending = t->stop_waiting = true;
+    } else ++t->stop_index;
 }
 
 void ArmTrim_Process(ArmTrim_t *t)
@@ -378,13 +466,7 @@ void ArmTrim_Process(ArmTrim_t *t)
     uint32_t now;
     if (t == NULL || !t->configured) return;
     if (t->status.state == ARM_TRIM_STOPPING) {
-        if (t->stop_index < 3U) {
-            if (!t->io.stop(t->io.user, t->stop_index)) {
-                t->status.stop_failed = true;
-                if (t->status.error == ARM_TRIM_OK) t->status.error = ARM_TRIM_TRANSPORT;
-            }
-            ++t->stop_index;
-        } else t->status.state = t->status.error == ARM_TRIM_OK ? ARM_TRIM_CANCELLED : ARM_TRIM_FAULT;
+        ProcessStopping(t);
         return;
     }
     if (!Active(t)) return;
@@ -394,6 +476,19 @@ void ArmTrim_Process(ArmTrim_t *t)
         return;
     }
     t->service_tick = now;
+    if (t->tx_pending) {
+        uint32_t started = 0U, completed = 0U;
+        bool timed_out;
+        ArmTrimTxState_t result = PollTransfer(t, now, &started, &completed, &timed_out);
+        if (result == ARM_TRIM_TX_PENDING) return;
+        t->tx_pending = false;
+        if (result != ARM_TRIM_TX_COMPLETE) {
+            Fail(t, timed_out ? ARM_TRIM_SERVICE_TIMEOUT : ARM_TRIM_TRANSPORT);
+            return;
+        }
+        t->dispatch_tick = started;
+        t->segment_tick = completed;
+    }
     if (t->status.state == ARM_TRIM_SETTLING) {
         if ((uint32_t)(now - t->segment_tick) >= t->config.settle_ms) {
             t->status.offset_mm = t->status.target_offset_mm;

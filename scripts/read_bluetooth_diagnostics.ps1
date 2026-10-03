@@ -1,8 +1,9 @@
 param(
+    [switch]$SymbolsOnly,
     [string]$OpenOcdExecutable = 'D:\Tool\xpack-openocd-0.12.0-7\bin\openocd.exe',
     [string]$NmExecutable = '',
     [string]$GdbExecutable = '',
-    [ValidateSet('firmware_direct', 'rollback_v4_4_20261002', 'rollback_v4_3_20261002', 'rollback_v4_2_20261002', 'rollback_v4_1_20261002', 'rollback_v4_20261002', 'rollback_v3_1_20261001', 'rollback_v3_20261001')]
+    [ValidateSet('firmware_direct', 'rollback_v4_5_20261002', 'rollback_v4_4_20261002', 'rollback_v4_3_20261002', 'rollback_v4_2_20261002', 'rollback_v4_1_20261002', 'rollback_v4_20261002', 'rollback_v3_1_20261001', 'rollback_v3_20261001')]
     [string]$FirmwareDirectory = 'firmware_direct'
 )
 
@@ -50,6 +51,7 @@ $trimDiagFields = @(
     @{ Name='last_traced_len'; Label='BT_RAW_LAST_LENGTH'; Width='mdb'; Count=1 },
     @{ Name='last_traced_bytes'; Label='BT_RAW_LAST_FRAME'; Width='mdb'; Count=41 }
 )
+$trimDiagIsService = [bool]($trimDiagSymbolLines -match '[\\/]arm_trim_service\.c:')
 $trimDiagTypedFields = @(
     @{ Label='ARM_STATE'; Expr="'arm_trim_bluetooth.c'::trim.status.state"; Count=1 },
     @{ Label='ARM_ERROR'; Expr="'arm_trim_bluetooth.c'::trim.status.error"; Count=1 },
@@ -71,9 +73,16 @@ $trimDiagTypedFields = @(
     @{ Label='ARM_OFFSET_BITS'; Expr="'arm_trim_bluetooth.c'::trim.status.offset_mm"; Count=1 },
     @{ Label='ARM_TARGET_OFFSET_BITS'; Expr="'arm_trim_bluetooth.c'::trim.status.target_offset_mm"; Count=1 }
 )
-# Old verified images lack v4's request result and jog fields.  Their other
-# addresses/widths are still obtained from their own DWARF, never hardcoded.
-if (-not ($trimDiagSymbolLines -match '\s+last_request_result\s')) {
+if ($trimDiagIsService) {
+    $trimDiagTypedFields = @($trimDiagTypedFields | ForEach-Object {
+        $field = $_.Clone()
+        $field.Expr = $field.Expr.Replace("'arm_trim_bluetooth.c'::trim.", "'arm_trim_service.c'::service.trim.")
+        $field.Expr = $field.Expr.Replace("'arm_trim_bluetooth.c'::last_request_result", "'arm_trim_service.c'::service.last_request")
+        $field.Expr = $field.Expr.Replace("'arm_trim_bluetooth.c'::owns_motion", "'arm_trim_service.c'::service.owns")
+        $field
+    })
+    $trimDiagTypedFields += @{ Label='ARM_SERVICE_STATE'; Expr="'arm_trim_service.c'::service.state"; Count=1 }
+} elseif (-not ($trimDiagSymbolLines -match '\s+last_request_result\s')) {
     $trimDiagTypedFields = @($trimDiagTypedFields | Where-Object {
         $_.Label -ne 'ARM_REQUEST_ERROR' -and $_.Label -ne 'ARM_JOGGING'
     })
@@ -95,8 +104,21 @@ try {
         elseif ($trimDiagLine -match '^SIZE_(\w+)=(1|2|4)$') { $trimDiagWidths[$Matches[1]] = 8 * [int]$Matches[2] }
     }
 } finally { Remove-Item -LiteralPath $trimDiagGdbTemporary -ErrorAction SilentlyContinue }
+if ($SymbolsOnly) {
+    foreach ($trimDiagField in $trimDiagTypedFields) {
+        if (-not $trimDiagAddresses.ContainsKey($trimDiagField.Label) -or
+            -not $trimDiagWidths.ContainsKey($trimDiagField.Label)) {
+            throw ('Missing typed diagnostic: ' + $trimDiagField.Label)
+        }
+        Write-Output ('{0}={1} WIDTH={2} COUNT={3}' -f $trimDiagField.Label,
+            $trimDiagAddresses[$trimDiagField.Label], $trimDiagWidths[$trimDiagField.Label], $trimDiagField.Count)
+    }
+    Write-Output 'SYMBOLS_ONLY_DONE; no hardware connection attempted.'
+    exit 0
+}
 $trimDiagCommands = @('init', 'set diag_failed [catch {', 'halt',
     ('verify_image ' + $FirmwareDirectory + '/stm32f407_bt_oled.hex'), 'echo CURRENT_FIRMWARE_VERIFIED')
+$trimDiagFields = @($trimDiagFields | Where-Object { $trimDiagSymbols.ContainsKey($_.Name) })
 foreach ($trimDiagField in $trimDiagFields) {
     if (-not $trimDiagSymbols.ContainsKey($trimDiagField.Name)) {
         throw ('Required diagnostic symbol missing: ' + $trimDiagField.Name)

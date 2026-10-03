@@ -118,12 +118,45 @@ bool Heading_AdjustTarget(float delta_degrees)
     return Heading_SetTarget(h.target+delta_degrees);
 }
 
+void Heading_Suspend(void)
+{
+    ClearOutput();
+    allowed_last = false;
+    control_ms = HAL_GetTick();
+    h.heading_hold = false;
+    h.fault = HEADING_INHIBITED;
+}
+
+bool Heading_SetReference(float raw_yaw, float target_degrees)
+{
+    if (!isfinite(raw_yaw) || !isfinite(target_degrees)) return false;
+    Heading_Suspend();
+    h.yaw_zero = Normalize(raw_yaw);
+    h.target = Normalize(target_degrees);
+    h.reference_valid = true;
+    h.angle_adjusting = false;
+    h.state = HEADING_HOLD;
+    return true;
+}
+
 int16_t Heading_Update(bool motion_allowed)
+{
+    return Heading_UpdateWithLimits(motion_allowed, HEADING_START_DEG,
+                                   HEADING_STOP_DEG, MAX_YAW_CORRECTION_RPM);
+}
+
+int16_t Heading_UpdateWithLimits(bool motion_allowed, float start_degrees,
+                                float stop_degrees, float max_rpm)
 {
     const JY61_Data *data=JY61_GetData();
     uint32_t now=HAL_GetTick();
     uint32_t elapsed=now-control_ms;
     float error_magnitude;
+    if (!isfinite(start_degrees) || !isfinite(stop_degrees) || !isfinite(max_rpm) ||
+        stop_degrees < 0.0f || start_degrees <= stop_degrees || max_rpm <= 0.0f) {
+        Heading_Suspend();
+        return 0;
+    }
     control_ms=now;
     allowed_last=motion_allowed;
     h.omega_correction=0.0f;
@@ -153,15 +186,17 @@ int16_t Heading_Update(bool motion_allowed)
     error_magnitude=Abs(h.yaw_error);
     h.fault=HEADING_NO_FAULT;
 
-    if (error_magnitude<=HEADING_STOP_DEG) {
+    if (error_magnitude<=stop_degrees) {
         integral_output=0.0f;
         h.heading_hold=true;
         h.angle_adjusting=false;
         h.state=HEADING_HOLD;
         return 0;
     }
-    if (!h.angle_adjusting && h.state==HEADING_HOLD && error_magnitude<HEADING_START_DEG)
+    if (!h.angle_adjusting && h.state==HEADING_HOLD && error_magnitude<start_degrees) {
+        h.heading_hold=true;
         return 0;
+    }
 
     h.heading_hold=false;
     h.state=h.angle_adjusting ? HEADING_ANGLE_ADJUST : HEADING_CORRECTING;
@@ -174,15 +209,15 @@ int16_t Heading_Update(bool motion_allowed)
         else if (elapsed!=0U) {
             double delta=(double)pid.ki*h.yaw_error*((double)elapsed/1000.0);
             double candidate=(double)integral_output+delta;
-            if (candidate>MAX_YAW_CORRECTION_RPM) candidate=MAX_YAW_CORRECTION_RPM;
-            if (candidate< -MAX_YAW_CORRECTION_RPM) candidate=-MAX_YAW_CORRECTION_RPM;
-            if (!((pd+candidate>MAX_YAW_CORRECTION_RPM && delta>0.0) ||
-                  (pd+candidate< -MAX_YAW_CORRECTION_RPM && delta<0.0)))
+            if (candidate>max_rpm) candidate=max_rpm;
+            if (candidate< -max_rpm) candidate=-max_rpm;
+            if (!((pd+candidate>max_rpm && delta>0.0) ||
+                  (pd+candidate< -max_rpm && delta<0.0)))
                 integral_output=(float)candidate;
         }
         correction=HEADING_CORRECTION_SIGN*(pd+integral_output);
-        if (correction>MAX_YAW_CORRECTION_RPM) correction=MAX_YAW_CORRECTION_RPM;
-        if (correction< -MAX_YAW_CORRECTION_RPM) correction=-MAX_YAW_CORRECTION_RPM;
+        if (correction>max_rpm) correction=max_rpm;
+        if (correction< -max_rpm) correction=-max_rpm;
         h.omega_correction=(float)correction;
         h.omega_final=(int16_t)correction;
     }

@@ -1,3 +1,4 @@
+#include "arm_trim_project.h"
 #include "arm_trim.h"
 #include "arm_trim_project_config.h"
 #include <math.h>
@@ -31,12 +32,27 @@ static bool Stop(void *user, unsigned joint)
 { CHECK(user == &trim && joint < 3U); ++stops; return stop_ok; }
 static uint32_t Now(void *user) { CHECK(user == &trim); return tick; }
 static void Lateral(void *user, float error) { CHECK(user == &trim); lateral = error; }
+static ArmKinematicsResult_t ProjectForward(const uint16_t p[3], ArmPose2D_t *pose)
+{
+    ArmKinematicsGeometry_t geometry;
+    ArmServoCalibration_t calibration[3];
+    ArmJointAngles_t q;
+    float *angle[] = {&q.q0_rad, &q.q1_rad, &q.q2_rad};
+    unsigned i;
+    ArmTrimProject_Geometry(&geometry);
+    ArmTrimProject_Calibrations(calibration);
+    for (i = 0U; i < 3U; ++i) {
+        ArmKinematicsResult_t result = ArmKinematics_PositionToAngle(&calibration[i], p[i], angle[i]);
+        if (result != ARM_KINEMATICS_OK) return result;
+    }
+    return ArmKinematics_Forward(&geometry, &q, pose);
+}
 static ArmTrimConfig_t Config(bool full_range)
 {
     ArmTrimConfig_t c;
     ArmTrim_DefaultConfig(&c);
-    ArmKinematics_ProjectGeometry(&c.geometry);
-    ArmKinematics_ProjectCalibrations(c.calibration);
+    ArmTrimProject_Geometry(&c.geometry);
+    ArmTrimProject_Calibrations(c.calibration);
     c.calibration[0].max_position = ARM_TRIM_PROJECT_P0_MAX;
     if (full_range) { c.enabled_min_mm = -75.0f; c.enabled_max_mm = 75.0f; }
     return c;
@@ -162,7 +178,7 @@ static void TestHeldJog(void)
                 CHECK(trim.segments[i].move_ms <= trim.config.update_period_ms);
                 CHECK(distance <= trim.config.speed_mm_s * (float)trim.segments[i].move_ms / 1000.0f + 0.001f);
                 CHECK(trim.segments[i].end_speed_mm_s >= 0.0f && trim.segments[i].end_speed_mm_s <= trim.config.speed_mm_s + 0.001f);
-                CHECK(ArmKinematics_ProjectForward(trim.segments[i].position, &pose) == ARM_KINEMATICS_OK);
+                CHECK(ProjectForward(trim.segments[i].position, &pose) == ARM_KINEMATICS_OK);
                 CHECK(fabsf(pose.z_mm - trim.status.origin.z_mm) < 1.0f);
                 CHECK(fabsf(pose.phi_rad - trim.status.origin.phi_rad) < 0.02f);
                 previous = trim.segments[i].offset_mm;
@@ -230,7 +246,7 @@ static void TestRearBoxGuard(void)
     ArmTrimConfig_t c = Config(true);
     ArmTrimIO_t io = {Send, Stop, Now, Lateral, &trim};
     unsigned i;
-    ArmCollision_ProjectModel(&c.collision);
+    ArmTrimProject_Collision(&c.collision);
     CHECK(ArmTrim_Init(&trim, &c, &io) == ARM_TRIM_OK);
     sends = stops = 0U;
     CHECK(ArmTrim_Synchronize(&trim, lift) == ARM_TRIM_PATH_INVALID);
@@ -271,10 +287,10 @@ static void TestRearBoxGuard(void)
     /* Valid pose with only an obstacle on the requested positive path.
      * A two-mm request is rejected in full before any transport call. */
     c = Config(true);
-    ArmCollision_ProjectModel(&c.collision);
+    ArmTrimProject_Collision(&c.collision);
     {
         ArmPose2D_t origin;
-        CHECK(ArmKinematics_ProjectForward(refs[0], &origin) == ARM_KINEMATICS_OK);
+        CHECK(ProjectForward(refs[0], &origin) == ARM_KINEMATICS_OK);
         c.collision.box_min[0] = origin.x_mm + 1.5f;
         c.collision.box_max[0] = origin.x_mm + 2.5f;
         c.collision.box_min[2] = origin.z_mm - 0.1f;
@@ -291,12 +307,36 @@ static void TestRearBoxGuard(void)
     CHECK(ArmTrim_Init(&trim, &c, &io) == ARM_TRIM_INVALID);
 }
 
+static void TestReplacementReference(void)
+{
+    const uint16_t good[] = {1356U, 1850U, 698U};
+    const uint16_t outside[] = {1801U, 1850U, 698U};
+    const uint16_t singular[] = {1356U, 1687U, 698U};
+    ArmTrimConfig_t project;
+    ArmTrimProject_DefaultConfig(&project);
+    CHECK(fabsf(project.geometry.link_2_mm - 84.75f) < 0.001f);
+    CHECK(project.calibration[0].min_position == 915U && project.calibration[0].max_position == 1800U);
+    CHECK(project.calibration[1].min_position == 947U && project.calibration[2].max_position == 1874U);
+    CHECK(project.collision.enabled && project.enabled_min_mm == -75.0f && project.enabled_max_mm == 75.0f);
+    Init(true);
+    CHECK(ArmTrim_Synchronize(&trim, good) == ARM_TRIM_OK);
+    CHECK(ArmTrim_Synchronize(&trim, outside) == ARM_TRIM_OUT_OF_RANGE);
+    CHECK(!trim.status.reference_valid);
+    CHECK(ArmTrim_MoveRelativeX(&trim, 1.0f) == ARM_TRIM_REFERENCE_REQUIRED && sends == 0U);
+    CHECK(ArmTrim_Synchronize(&trim, good) == ARM_TRIM_OK);
+    CHECK(ArmTrim_Synchronize(&trim, singular) == ARM_TRIM_PATH_INVALID);
+    CHECK(!trim.status.reference_valid && ArmTrim_StartJog(&trim, 1) == ARM_TRIM_REFERENCE_REQUIRED);
+    CHECK(ArmTrim_Synchronize(&trim, good) == ARM_TRIM_OK);
+    CHECK(ArmTrim_Synchronize(&trim, NULL) == ARM_TRIM_INVALID && !trim.status.reference_valid);
+}
+
 int main(void)
 {
     TestProfiles();
     TestLongPathAndFailures();
     TestRearBoxGuard();
     TestHeldJog();
+    TestReplacementReference();
     printf("arm trim: %u checks passed\n", checks);
     return 0;
 }

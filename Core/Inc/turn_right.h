@@ -47,6 +47,8 @@ typedef struct
 HAL_StatusTypeDef right90(int16_t rpm);
 HAL_StatusTypeDef right180(int16_t rpm);
 HAL_StatusTypeDef left90(int16_t rpm);
+/* Remote turns retain raw IMU coordinates; -90/90/180 only, no Z reset. */
+HAL_StatusTypeDef TurnRight_StartRemote(int16_t degrees, int16_t rpm);
 void TurnRight_Process(bool motion_allowed);
 void TurnRight_Cancel(void);
 const TurnRightStatus_t *TurnRight_GetStatus(void);

@@ -1,16 +1,11 @@
+/* Legacy arm module: host tests only; excluded from the firmware image. */
 #include "arm_tuner.h"
 #include "arm_config.h"
 #include "arm_control.h"
 #include "arm_kinematics.h"
-#include "arm_trim_bluetooth.h"
-#include "arm_trim_bench.h"
 #include "bluetooth_driver.h"
-#include "car_control.h"
 #include "heading_config.h"
-#include "motor_driver.h"
 #include "pid_tuner.h"
-#include "serial_io.h"
-#include "servo_pose.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
@@ -43,8 +38,6 @@ static int16_t remote_arm_x, remote_arm_y;
  * behaviour. */
 static int16_t remote_direction_latch;
 static uint32_t remote_axis_tick;
-static uint8_t next_preset;
-static uint16_t remote_preset_buttons_latch;
 
 static void Reply(const char *format, ...)
 {
@@ -70,7 +63,6 @@ static bool WorkspaceReady(void)
 
 static void Stop(void)
 {
-    ArmTrimBench_Cancel();
     (void)Arm_SetMotionAllowed(false);
     if (Arm_GetStatus().state != ARM_UNCONFIGURED) (void)Arm_Stop();
     memset(target_known, 0, sizeof(target_known));
@@ -85,7 +77,6 @@ static void Stop(void)
     dual_center_samples = 0U;
     remote_arm_x = remote_arm_y = 0;
     remote_direction_latch = BT_DIRECTION_NONE;
-    remote_preset_buttons_latch = 0U;
 }
 
 static const char *StateName(ArmState_t state)
@@ -130,25 +121,6 @@ static void ShowTargets(void)
           (unsigned)target[2], (unsigned)target[3], (unsigned)target[4]);
 }
 
-static void ShowLink(void)
-{
-    const BtArmControl_t *control = Bluetooth_GetArmControl();
-    Reply("ARM LINK RX_LEN=%u ARM_LEN=%u SEQ=%lu ARM_SEQ=%lu INVALID=%lu "
-          "RECOVER=%lu BASE=%u ARM=%u CMD=%d AX=%d AY=%d TEST_LEN=%u TEST_SEQ=%lu\r\n",
-          (unsigned)Bluetooth_GetLastFrameLength(),
-          (unsigned)Bluetooth_GetLastArmFrameLength(),
-          (unsigned long)Bluetooth_GetSequence(),
-          (unsigned long)Bluetooth_GetArmSequence(),
-          (unsigned long)Bluetooth_GetInvalidFrameCount(),
-          (unsigned long)bluetooth_rx_recoveries,
-          (unsigned)Bluetooth_IsConnected(),
-          (unsigned)Bluetooth_ArmIsConnected(),
-          (int)control->direction, (int)control->arm_x,
-          (int)control->arm_y,
-          (unsigned)Bluetooth_GetLastTestFrameLength(),
-          (unsigned long)Bluetooth_GetTestSequence());
-}
-
 static bool RemoteCentered(const BtArmControl_t *control)
 {
     return (control->direction == 0 || control->direction == 1) &&
@@ -162,17 +134,6 @@ static bool RemoteCentered(const BtArmControl_t *control)
              control->arm_y >= -ARM_TUNER_REMOTE_DEADZONE &&
              control->arm_y <= ARM_TUNER_REMOTE_DEADZONE)) &&
            !control->brake && !control->disable;
-}
-
-static bool ChassisControlsNeutral(void)
-{
-    const BluetoothControlFrame *c = &Bluetooth_GetControl()->frame;
-    return c->joy_x >= -JOY_DEADZONE && c->joy_x <= JOY_DEADZONE &&
-           c->joy_y >= -JOY_DEADZONE && c->joy_y <= JOY_DEADZONE &&
-           !c->forward && !c->backward && !c->stop && !c->strafe_left &&
-           !c->strafe_right && !c->right_90 && !c->right_180 &&
-           !c->left_90 && !c->Cam_T && !c->Shot && !c->aim &&
-           !c->brake && !c->disable;
 }
 
 static bool CartesianConfigurationValid(void)
@@ -312,8 +273,6 @@ static void BeginDualStart(void)
     dual_center_samples = 0U;
     remote_arm_x = remote_arm_y = 0;
     remote_direction_latch = BT_DIRECTION_NONE;
-    next_preset = 0U;
-    remote_preset_buttons_latch = 0U;
     move_ms = ARM_TUNER_DUAL_REFERENCE_MS;
     Bluetooth_SetExtended(1U);
     joystick_sequence = Bluetooth_GetArmSequence();
@@ -346,7 +305,6 @@ static void FinishDualReferenceMove(void)
     dual_center_samples = 0U;
     remote_arm_x = remote_arm_y = 0;
     remote_direction_latch = BT_DIRECTION_NONE;
-    remote_preset_buttons_latch = 0U;
     remote_axis_tick = HAL_GetTick();
     move_ms = ARM_TUNER_REMOTE_MIN_PERIOD_MS;
     joystick_sequence = Bluetooth_GetArmSequence();
@@ -501,65 +459,6 @@ static void RemoteGripStep(int delta_position)
     RemoteGrip((uint16_t)candidate);
 }
 
-static void StartPreset(unsigned index)
-{
-    ArmStep_t step;
-    ArmPose2D_t pose;
-    ArmResult_t result;
-    ServoPoseResult_t pose_result;
-    ServoMode_t mode;
-    size_t joint;
-    if (index >= SERVO_POSE_COUNT) {
-        Reply("ARM ERR PRESET_RANGE 0_TO_%u\r\n", SERVO_POSE_COUNT - 1U);
-        return;
-    }
-    if (!dual_enabled || !remote_enabled || !WorkspaceReady() ||
-        !Arm_GetStatus().motion_allowed) {
-        Reply("ARM ERR PRESET_DUAL_NOT_READY\r\n");
-        return;
-    }
-    if (!Bluetooth_IsConnected() ||
-        Car_Control_GetState() != CAR_READY || !Motor_IsIdle() ||
-        !ChassisControlsNeutral()) {
-        Reply("ARM ERR PRESET_CHASSIS_NOT_READY\r\n");
-        return;
-    }
-    if (Active()) {
-        Reply("ARM ERR BUSY\r\n");
-        return;
-    }
-    mode = (ServoMode_t)(SERVO_MODE_BALL_PREPARE + index);
-    pose_result = ServoPose_BuildOriginalMode(mode, &step);
-    if (pose_result != SERVO_POSE_OK) {
-        Reply("ARM ERR PRESET_DATA RESULT=%u\r\n", (unsigned)pose_result);
-        return;
-    }
-    step.move_ms = ARM_TUNER_PRESET_MOVE_MS;
-    result = Arm_StartOriginalPreset(&step);
-    if (result == ARM_OK) {
-        for (joint = 0U; joint < 4U; ++joint) {
-            target[joint] = step.position[joint];
-            target_known[joint] = true;
-        }
-        memcpy(cartesian_position, step.position, sizeof(cartesian_position));
-        if (ArmKinematics_ProjectForward(cartesian_position, &pose) ==
-            ARM_KINEMATICS_OK) {
-            cartesian_pose = pose;
-            cartesian_known = true;
-        } else {
-            cartesian_known = false;
-        }
-        next_preset = (uint8_t)((index + 1U) % SERVO_POSE_COUNT);
-        remote_arm_x = remote_arm_y = 0;
-    }
-    Reply("ARM PRESET RESULT=%u INDEX=%u NAME=%s P=%u,%u,%u,%u T=%u %s\r\n",
-          (unsigned)result, index, ServoPose_Name(mode),
-          (unsigned)step.position[0], (unsigned)step.position[1],
-          (unsigned)step.position[2], (unsigned)step.position[3],
-          ARM_TUNER_PRESET_MOVE_MS,
-          result == ARM_OK ? "ACCEPTED_NOT_ARRIVED" : "REJECTED");
-}
-
 static void RemoteCartesianDelta(int dx, int dz)
 {
     if (dx == 0 && dz == 0) return;
@@ -605,12 +504,6 @@ static void RemoteJog(const BtArmControl_t *control)
             remote_direction_latch = control->direction;
             RemoteGripStep(-(int)ARM_TUNER_REMOTE_GRIP_STEP_P);
             return;
-        case BT_DIRECTION_ARM_PRESET_NEXT:
-            remote_arm_x = remote_arm_y = 0;
-            if (remote_direction_latch == control->direction) return;
-            remote_direction_latch = control->direction;
-            StartPreset(next_preset);
-            return;
         default:
             remote_direction_latch = BT_DIRECTION_NONE;
             dx = RemoteAxisStep(control->arm_x);
@@ -639,16 +532,6 @@ void ArmTuner_Process(void)
     bool brake = fresh &&
                  (Bluetooth_GetArmControl()->brake || Bluetooth_GetArmControl()->disable);
     joystick_sequence = seq;
-    if (ArmTrimBench_IsActive()) {
-        if (brake) ArmTrimBench_Cancel();
-        ArmTrimBench_Process();
-        return;
-    }
-    if (ArmTrimBluetooth_OwnsMotion()) {
-        if (brake) ArmTrimBluetooth_Cancel();
-        ArmTrimBluetooth_Process();
-        return;
-    }
     if (!session) return;
     if (brake) { Stop(); Reply("ARM STOP JOYSTICK\r\n"); return; }
     if (dual_restart_pending) {
@@ -729,13 +612,8 @@ void ArmTuner_Process(void)
         }
         if (fresh && Bluetooth_ArmIsConnected()) {
             const BtArmControl_t *control = Bluetooth_GetArmControl();
-            uint16_t preset_buttons = (uint16_t)(
-                Bluetooth_GetControl()->frame.servo_buttons & 0x00FFU);
-            uint16_t new_preset_buttons = (uint16_t)(
-                preset_buttons & (uint16_t)~remote_preset_buttons_latch);
             ArmStatus_t current;
             remote_rx_tick = control->last_rx_tick;
-            remote_preset_buttons_latch = preset_buttons;
             current = Arm_GetStatus();
             if (!current.motion_allowed && RemoteCentered(control)) {
                 remote_center_seen = true;
@@ -767,17 +645,6 @@ void ArmTuner_Process(void)
             current = Arm_GetStatus();
             if (current.motion_allowed) {
                 heartbeat_tick = control->last_rx_tick;
-                if (dual_enabled && new_preset_buttons != 0U &&
-                    preset_buttons == new_preset_buttons &&
-                    (new_preset_buttons &
-                     (uint16_t)(new_preset_buttons - 1U)) == 0U) {
-                    unsigned preset_index = 0U;
-                    while ((new_preset_buttons &
-                            (uint16_t)(1U << preset_index)) == 0U)
-                        ++preset_index;
-                    StartPreset(preset_index);
-                    return; /* Consume the edge whether accepted or rejected. */
-                }
                 if (dual_enabled || cartesian_known) RemoteJog(control);
             }
         }
@@ -813,8 +680,6 @@ static void HandleLine(const char *line, uint32_t tick)
     int signed_a = 0, signed_b = 0, signed_c = 0;
     ArmResult_t result;
     if (line == NULL) {
-        if (ArmTrimBench_HandleLine(NULL, tick, session)) return;
-        if (ArmTrimBluetooth_HandleLine(NULL, tick, session)) return;
         if (session && dual_enabled && remote_enabled) {
             /* A UART receive recovery invalidates the packet stream, but every
              * dual-mode command is already a bounded segment. Do not erase the
@@ -831,25 +696,7 @@ static void HandleLine(const char *line, uint32_t tick)
         }
         return;
     }
-    if (ArmTrimBench_HandleLine(line, tick, session)) return;
     if (strncmp(line, "@ARM ", 5U) != 0) return;
-    if ((uint32_t)(HAL_GetTick() - tick) > BT_FAILSAFE_TIMEOUT_MS) return;
-    if (ArmTrimBench_IsActive() && ArmTrimBluetooth_OwnsMotion() &&
-        strncmp(line, "@ARM TRIM ", 10U) == 0 &&
-        strcmp(line, "@ARM TRIM STATUS") != 0 &&
-        strncmp(line, "@ARM TRIM KEEP ", 15U) != 0 &&
-        strcmp(line, "@ARM TRIM RELEASE") != 0) {
-        if (strcmp(line, "@ARM TRIM STOP") == 0) ArmTrimBench_Cancel();
-        else { Reply("TRIM ERR BENCH_BUSY\r\n"); return; }
-    }
-    if (ArmTrimBluetooth_HandleLine(line, tick, session || ArmTrimBench_IsActive())) return;
-    if (ArmTrimBluetooth_OwnsMotion() || ArmTrimBench_IsActive()) {
-        if (strcmp(line, "@ARM STOP") == 0) {
-            Stop();
-            Reply("ARM STOP REQUESTED\r\n");
-        } else Reply("ARM ERR TEST_OWNS_MOTION; END_TRIM_OR_WAIT_BENCH\r\n");
-        return;
-    }
     ArmTuner_Process(); /* Expired sessions cannot be revived by a late PING. */
     if (strlen(line) >= sizeof(copy) || (uint32_t)(HAL_GetTick()-tick)>BT_FAILSAFE_TIMEOUT_MS)
         return;
@@ -866,7 +713,6 @@ static void HandleLine(const char *line, uint32_t tick)
 #define CMD(name, n) (strcmp(word[0], (name)) == 0 && count == (n))
     if (CMD("SHOW", 1U)) { Show(); return; }
     if (CMD("TARGETS", 1U)) { ShowTargets(); return; }
-    if (CMD("LINK", 1U)) { ShowLink(); return; }
     if (CMD("IK", 4U) &&
         SignedNumber(word[1], -ARM_TUNER_COORDINATE_LIMIT_MM,
                      ARM_TUNER_COORDINATE_LIMIT_MM, &signed_a) &&
@@ -1076,19 +922,6 @@ static void HandleLine(const char *line, uint32_t tick)
               result == ARM_OK ? "ACCEPTED_NOT_ARRIVED" : "REJECTED");
         return;
     }
-    if (CMD("PRESET", 2U) && strcmp(word[1], "NEXT") == 0) {
-        StartPreset(next_preset);
-        return;
-    }
-    if (CMD("PRESET", 2U) && Number(word[1], SERVO_POSE_COUNT - 1U, &a)) {
-        StartPreset(a);
-        return;
-    }
-    if (strcmp(word[0], "PRESET") == 0) {
-        Reply("ARM ERR SYNTAX; PRESET 0_TO_%u OR PRESET NEXT\r\n",
-              SERVO_POSE_COUNT - 1U);
-        return;
-    }
     if (CMD("REMOTE", 2U) && strcmp(word[1], "SHOW") == 0) {
         ArmStatus_t remote_status = Arm_GetStatus();
         Reply("ARM REMOTE=%u REF=%u CENTER=%u CONNECTED=%u TIME=%u DUAL=%u "
@@ -1214,8 +1047,6 @@ static void HandleLine(const char *line, uint32_t tick)
 
 void ArmTuner_Init(void)
 {
-    if (ArmTrimBluetooth_OwnsMotion() || ArmTrimBench_IsActive()) return;
-    ArmTrimBluetooth_Init();
     Arm_ProjectConfig(&config);
     if (Arm_Configure(&config) != ARM_OK) Arm_DefaultConfig(&config);
     session = false; selected = 0U; move_ms = 0U; step_size = 5U;
@@ -1235,17 +1066,14 @@ void ArmTuner_Init(void)
     dual_center_samples = 0U;
     remote_arm_x = remote_arm_y = 0;
     remote_direction_latch = BT_DIRECTION_NONE;
-    next_preset = 0U;
-    remote_preset_buttons_latch = 0U;
     remote_axis_tick = HAL_GetTick();
     remote_step_tick = HAL_GetTick();
     heartbeat_tick = HAL_GetTick();
     joystick_sequence = Bluetooth_GetArmSequence();
     Bluetooth_SetTextHandler(HandleLine);
-    Debug_Log("ARM TRIM FW=V4.5 L2_MM=84.75 WT=HOLD_JOG BYTE0=0_OR_84\r\n");
 }
 
 uint8_t ArmTuner_IsSessionActive(void)
 {
-    return (uint8_t)(session || ArmTrimBluetooth_OwnsMotion() || ArmTrimBench_IsActive());
+    return session;
 }

@@ -28,12 +28,33 @@ typedef struct
     bool target_valid;
 } MaxiCamTargetData_t;
 
+/* Camera recognition mode. The controller byte is only effective after the
+ * camera has sent a QR notification (detect_data.h), and the protocol has no
+ * acknowledge, so requests are deferred and retried instead of failing. */
+typedef enum
+{
+    MAXICAM_MODE_NONE = 0,  /* leave the camera in its power-up mode */
+    MAXICAM_MODE_OBJECT,    /* MODE_CMD_OBJECT */
+    MAXICAM_MODE_AIM        /* MODE_CMD_AIM */
+} MaxiCamMode_t;
+
 void MaxiCam_Init(void);
 void MaxiCam_Process(void);
 void MaxiCam_RxCallback(UART_HandleTypeDef *uart);
 void MaxiCam_ErrorCallback(UART_HandleTypeDef *uart);
 void MaxiCam_GetTargetData(MaxiCamTargetData_t *data, uint32_t *frame_sequence);
-/* Sends exactly one protocol byte on UART4; HAL_OK does not acknowledge mode. */
-HAL_StatusTypeDef MaxiCam_SendMode(uint8_t command);
+/* Records the wanted mode. Never blocks and never fails: the byte is sent from
+ * MaxiCam_Process() once a QR notification has been seen, and retried until it
+ * gets through. */
+void MaxiCam_RequestMode(MaxiCamMode_t mode);
+/* 1 while the requested mode has not been transmitted yet. */
+bool MaxiCam_ModePending(void);
+/* Last mode the camera was told about (MAXICAM_MODE_NONE before the first). */
+MaxiCamMode_t MaxiCam_GetMode(void);
+/* Monotonic count of independent 0x80 QR notifications since power-up. */
+uint32_t MaxiCam_GetQrNoticeCount(void);
+bool MaxiCam_QrNotified(void);
+/* Clear only the notification latch; the diagnostic count stays monotonic. */
+void MaxiCam_ResetQrNotice(void);
 
 #endif

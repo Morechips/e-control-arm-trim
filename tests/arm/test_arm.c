@@ -1,11 +1,12 @@
 #include "arm_control.h"
+#include "servo.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static uint32_t tick;
 static unsigned checks, tx_count;
-static char frames[64][ZLIS2_MAX_TX_LENGTH + 1U];
+static char frames[64][SERVO_MAX_TX_LENGTH + 1U];
 static HAL_StatusTypeDef next_tx = HAL_OK;
 static UART_HandleTypeDef uart;
 
@@ -15,15 +16,19 @@ static UART_HandleTypeDef uart;
 
 uint32_t HAL_GetTick(void) { return tick; }
 
-HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *port, const uint8_t *data,
-                                   uint16_t length, uint32_t timeout)
+HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *port, const uint8_t *data,
+                                      uint16_t length)
 {
     HAL_StatusTypeDef result = next_tx;
-    CHECK(port == &uart && timeout == ZLIS2_TX_TIMEOUT_MS);
-    CHECK(length <= ZLIS2_MAX_TX_LENGTH && tx_count < 64U);
+    CHECK(port == &uart);
+    CHECK(length <= SERVO_MAX_TX_LENGTH && tx_count < 64U);
     memcpy(frames[tx_count], data, length);
     frames[tx_count++][length] = '\0';
     next_tx = HAL_OK;
+    if (result == HAL_OK) {
+        port->gState = HAL_UART_STATE_READY;
+        Servo_TxCallback(port);
+    }
     tick += 3U; /* Make timing distinguish request time from TX completion. */
     return result;
 }
@@ -166,13 +171,10 @@ static void TestOriginalPresetAndReset(void)
     step.position[0] = 499U;
     CHECK(Arm_StartOriginalPreset(&step) == ARM_INVALID_ARGUMENT);
     step.position[0] = 2192U;
-    CHECK(Arm_StartOriginalPreset(&step) == ARM_INVALID_ARGUMENT);
-    CHECK(tx_count == 0U && Arm_GetStatus().state == ARM_IDLE);
-    step.position[0] = 1900U;
     CHECK(Arm_StartOriginalPreset(&step) == ARM_OK);
     CHECK(Arm_ResetController() == ARM_BUSY);
     Arm_Process();
-    CHECK(strcmp(frames[0], "{#007P1900T0100!}") == 0);
+    CHECK(strcmp(frames[0], "{#007P2192T0100!}") == 0);
     tick += 100U; Arm_Process();
     CHECK(Arm_GetStatus().state == ARM_COMPLETE_ESTIMATED);
     CHECK(Arm_SetMotionAllowed(false) == ARM_OK);
@@ -186,44 +188,65 @@ static void TestOriginalPresetAndReset(void)
     CHECK(Arm_ClearFault() == ARM_OK);
 }
 
-static void TestProjectTravel(void)
+static void TestBluetoothResetPose(void)
 {
-    const uint16_t minimum[] = {915U, 947U, 500U};
-    const uint16_t maximum[] = {1800U, 2500U, 1874U};
     ArmConfig_t config;
-    ArmStep_t step = {0};
-    unsigned joint, side;
+    Prepare();
+    Arm_ProjectConfig(&config);
+    CHECK(Arm_Configure(&config) == ARM_OK);
+    CHECK(Arm_StartResetPose() == ARM_INHIBITED);
+    CHECK(Arm_SetMotionAllowed(true) == ARM_OK);
+    CHECK(Arm_StartResetPose() == ARM_OK);
+    CHECK(tx_count == 1U &&
+          strcmp(frames[0], "{#000P1524T2000!#001P1163T2000!#002P1693T2000!#003P1486T2000!}") == 0);
+    CHECK(Arm_StartResetPose() == ARM_BUSY);
+    for (unsigned elapsed = 0U;
+         elapsed < g_servo_legacy_reset_guard_ms - 1U;
+         ++elapsed)
+    {
+        ++tick;
+        Arm_Process();
+    }
+    CHECK(Arm_GetStatus().state == ARM_RUNNING);
+    ++tick; Arm_Process();
+    CHECK(Arm_GetStatus().state == ARM_COMPLETE_ESTIMATED && tx_count == 1U);
+
+    CHECK(Arm_SetMotionAllowed(false) == ARM_OK);
+    config.joints[0].max_position = 1500U;
+    CHECK(Arm_Configure(&config) == ARM_OK);
+    CHECK(Arm_SetMotionAllowed(true) == ARM_OK);
+    CHECK(Arm_StartResetPose() == ARM_INVALID_ARGUMENT && tx_count == 1U);
+    CHECK(Arm_SetMotionAllowed(false) == ARM_OK);
+    Arm_ProjectConfig(&config);
+    CHECK(Arm_Configure(&config) == ARM_OK);
+    CHECK(Arm_SetMotionAllowed(true) == ARM_OK);
+    next_tx = HAL_ERROR;
+    CHECK(Arm_StartResetPose() == ARM_FAULT_LATCHED);
+    CHECK(Arm_GetStatus().state == ARM_FAULT &&
+          Arm_GetStatus().error == ARM_ERROR_TRANSPORT);
+}
+
+static void TestBluetoothAimPose(void)
+{
+    ArmConfig_t config;
     Prepare();
     Arm_ProjectConfig(&config);
     CHECK(Arm_Configure(&config) == ARM_OK);
     CHECK(Arm_SetMotionAllowed(true) == ARM_OK);
-    step.move_ms = 100U;
-    for (joint = 0U; joint < 3U; ++joint) {
-        CHECK(config.joints[joint].min_position == minimum[joint]);
-        CHECK(config.joints[joint].max_position == maximum[joint]);
-        step.joint_mask = (uint8_t)(1U << joint);
-        for (side = 0U; side < 2U; ++side) {
-            step.position[joint] = side == 0U ? minimum[joint] - 1U : maximum[joint] + 1U;
-            CHECK(Arm_StartSequence(&step, 1U) == ARM_INVALID_ARGUMENT);
-            CHECK(Arm_StartOriginalPreset(&step) == ARM_INVALID_ARGUMENT);
-            CHECK(Arm_SendImmediate(&step) == ARM_INVALID_ARGUMENT);
-            Arm_Process();
-            CHECK(tx_count == 0U && Arm_GetStatus().state == ARM_IDLE);
-        }
+    CHECK(Arm_StartAimPose() == ARM_OK);
+    CHECK(tx_count == 1U &&
+          strcmp(frames[0], "{#000P1058T2000!#001P0821T2000!#002P0554T2000!#003P1499T2000!}") == 0);
+    for (unsigned elapsed = 0U;
+         elapsed < g_servo_legacy_aim_guard_ms - 1U;
+         ++elapsed)
+    {
+        ++tick;
+        Arm_Process();
     }
-    /* The measured endpoints remain inclusive; rejected requests above
-     * were neither transmitted nor clamped into the valid interval. */
-    step.joint_mask = 0x07U;
-    memcpy(step.position, minimum, sizeof(minimum));
-    CHECK(Arm_StartOriginalPreset(&step) == ARM_OK);
+    CHECK(Arm_GetStatus().state == ARM_RUNNING);
+    ++tick;
     Arm_Process();
-    CHECK(strcmp(frames[0], "{#000P0915T0100!#001P0947T0100!#002P0500T0100!}") == 0);
-    tick += 100U; Arm_Process();
-    memcpy(step.position, maximum, sizeof(maximum));
-    CHECK(Arm_StartOriginalPreset(&step) == ARM_OK);
-    Arm_Process();
-    CHECK(strcmp(frames[1], "{#000P1800T0100!#001P2500T0100!#002P1874T0100!}") == 0);
-    tick += 100U; Arm_Process();
+    CHECK(Arm_GetStatus().state == ARM_COMPLETE_ESTIMATED);
 }
 
 static void TestGapPreset(void)
@@ -273,7 +296,7 @@ static void TestCancellationAndFaults(void)
     next_tx = HAL_TIMEOUT; Arm_Process();
     CHECK(Arm_GetStatus().state == ARM_STOPPING);
     CHECK(Arm_GetStatus().error == ARM_ERROR_TRANSPORT);
-    CHECK(Arm_GetStatus().transport_result == ZLIS2_UART_ERROR);
+    CHECK(Arm_GetStatus().transport_result == SERVO_UART_ERROR);
     next_tx = HAL_ERROR; Arm_Process(); /* Stop failure still attempts the other joint. */
     FinishStop();
     CHECK(tx_count == 3U && strcmp(frames[2], "$DST:12!") == 0);
@@ -307,23 +330,22 @@ static void TestExtensionAndMissingTransport(void)
     CHECK(Arm_Stop() == ARM_OK); FinishStop();
     CHECK(tx_count == 4U && strcmp(frames[3], "$DST:254!") == 0);
 
-    Prepare(); CHECK(ZLIS2_Init(NULL) == ZLIS2_INVALID_PARAM);
+    Prepare(); CHECK(Servo_Init(NULL) == SERVO_INVALID_PARAM);
     CHECK(Arm_MoveJoint(ARM_JOINT_SHOULDER, 1500U, 100U, 0U) == ARM_OK);
     Arm_Process(); FinishStop();
     CHECK(tx_count == 0U && Arm_GetStatus().state == ARM_FAULT);
-    CHECK(Arm_GetStatus().transport_result == ZLIS2_NOT_INITIALIZED);
+    CHECK(Arm_GetStatus().transport_result == SERVO_NOT_INITIALIZED);
 }
 
 int main(void)
 {
     uart.Instance = &uart;
-    uart.Init.BaudRate = ZLIS2_BAUD_RATE;
+    uart.Init.BaudRate = SERVO_BAUD_RATE;
     uart.Init.Mode = UART_MODE_TX_RX;
     uart.gState = HAL_UART_STATE_READY;
-    CHECK(ZLIS2_Init(&uart) == ZLIS2_OK);
+    CHECK(Servo_Init(&uart) == SERVO_OK);
     TestConfiguration(); TestValidation(); TestSequence();
-    TestOriginalPresetAndReset();
-    TestProjectTravel();
+    TestOriginalPresetAndReset(); TestBluetoothResetPose(); TestBluetoothAimPose();
     TestGapPreset();
     TestCancellationAndFaults(); TestExtensionAndMissingTransport();
     printf("PASS arm: %u checks; limits, silent boot, ownership, sequence copies, timing/wrap, stop/fault paths.\n", checks);

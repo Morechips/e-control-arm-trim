@@ -21,6 +21,7 @@ typedef struct {
 #define UART_MODE_TX_RX (UART_MODE_TX | UART_MODE_RX)
 #define UART_HWCONTROL_NONE 0U
 #define HAL_UART_STATE_READY 0x20U
+#define __HAL_UART_CLEAR_OREFLAG(u) ((void)(u))
 #define __DMB() ((void)0)
 #define __get_PRIMASK() 0U
 #define __disable_irq() ((void)0)
@@ -30,5 +31,6 @@ HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *, uint8_t *, uint16_t)
 HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *, const uint8_t *, uint16_t);
 HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *, const uint8_t *, uint16_t, uint32_t);
 HAL_StatusTypeDef HAL_UART_AbortTransmit(UART_HandleTypeDef *);
+HAL_StatusTypeDef HAL_UART_AbortReceive(UART_HandleTypeDef *);
 #endif
 

@@ -1,3 +1,4 @@
+#include "arm_trim_project.h"
 #include "arm_trim.h"
 #include <stdio.h>
 
@@ -42,9 +43,9 @@ int main(void)
     ArmCollisionModel_t box;
     unsigned i;
     ArmTrim_DefaultConfig(&c);
-    ArmKinematics_ProjectGeometry(&c.geometry);
-    ArmKinematics_ProjectCalibrations(c.calibration);
-    ArmCollision_ProjectModel(&box);
+    ArmTrimProject_Geometry(&c.geometry);
+    ArmTrimProject_Calibrations(c.calibration);
+    ArmTrimProject_Collision(&box);
     c.enabled_min_mm = -75.0f; c.enabled_max_mm = 75.0f;
     printf("MODEL ONLY; no hardware; box X[-70,-30] Y[-50,50] Z[-31.2,38.8] mm\n");
     printf("Provisional radii %.1f,%.1f,%.1f mm; extra clearance %.1f mm\n",

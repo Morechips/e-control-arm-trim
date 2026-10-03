@@ -1,8 +1,6 @@
 #include "arm_collision.h"
-#include "arm_collision_config.h"
 #include <math.h>
 #include <stddef.h>
-#include <string.h>
 
 #define COLLISION_MAX_EDGE_SAMPLES 4096U
 
@@ -131,19 +129,4 @@ ArmCollisionResult_t ArmCollision_CheckEdge(const ArmCollisionModel_t *m,
         if (result != ARM_COLLISION_CLEAR) return result;
     }
     return ARM_COLLISION_CLEAR;
-}
-
-void ArmCollision_ProjectModel(ArmCollisionModel_t *m)
-{
-    if (m == NULL) return;
-    memset(m, 0, sizeof(*m));
-    m->enabled = ARM_COLLISION_PROJECT_ENABLED != 0;
-    m->box_min[0] = ARM_REAR_BOX_X_MIN_MM; m->box_max[0] = ARM_REAR_BOX_X_MAX_MM;
-    m->box_min[1] = ARM_REAR_BOX_Y_MIN_MM; m->box_max[1] = ARM_REAR_BOX_Y_MAX_MM;
-    m->box_min[2] = ARM_REAR_BOX_Z_MIN_MM; m->box_max[2] = ARM_REAR_BOX_Z_MAX_MM;
-    m->radius_mm[0] = ARM_COLLISION_LINK1_RADIUS_MM;
-    m->radius_mm[1] = ARM_COLLISION_LINK2_RADIUS_MM;
-    m->radius_mm[2] = ARM_COLLISION_TOOL_RADIUS_MM;
-    m->clearance_mm = ARM_COLLISION_CLEARANCE_MM;
-    m->sweep_resolution_mm = ARM_COLLISION_SWEEP_RESOLUTION_MM;
 }

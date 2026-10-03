@@ -95,7 +95,7 @@ static HAL_StatusTypeDef WriteCommand(uint8_t command)
 {
     uint8_t packet[] = {0x00U, command};
     return HAL_I2C_Master_Transmit(oled_i2c, SSD1306_HAL_ADDRESS,
-                                   packet, sizeof(packet), SSD1306_TIMEOUT_MS);
+                                   packet, sizeof(packet), SSD1306_INIT_TIMEOUT_MS);
 }
 
 HAL_StatusTypeDef SSD1306_Init(I2C_HandleTypeDef *i2c)
@@ -113,9 +113,8 @@ HAL_StatusTypeDef SSD1306_Init(I2C_HandleTypeDef *i2c)
     {
         return HAL_ERROR;
     }
-    HAL_Delay(100U);
     status = HAL_I2C_IsDeviceReady(oled_i2c, SSD1306_HAL_ADDRESS,
-                                 3U, SSD1306_TIMEOUT_MS);
+                                 1U, SSD1306_INIT_TIMEOUT_MS);
     if (status != HAL_OK)
     {
         return status;
@@ -128,13 +127,9 @@ HAL_StatusTypeDef SSD1306_Init(I2C_HandleTypeDef *i2c)
             return status;
         }
     }
-    /* Clear display RAM before enabling the panel to avoid random pixels. */
+    /* The full 1025-byte screen takes about 93 ms at 100 kHz. Keep it out of
+     * boot's blocking path; Board_InitDisplay submits the first screen via IT. */
     SSD1306_Clear();
-    status = SSD1306_UpdateScreen();
-    if (status != HAL_OK)
-    {
-        return status;
-    }
     return WriteCommand(0xAFU);
 }
 

@@ -1,94 +1,41 @@
 #include "serial_io.h"
+#include "uart_tx_queue.h"
 #include <string.h>
-static char logs[16][80];
-static uint8_t log_head, log_tail;
-static volatile uint8_t log_active;
-static uint32_t log_tick;
-void Serial_Init(SerialRx *rx, UART_HandleTypeDef *uart)
+static uint8_t logs[15][80], current[80];
+static uint16_t lengths[15];
+static UartTxQueue_t queue;
+static uint8_t initialized;
+static void Init(void)
 {
-    memset(rx, 0, sizeof(*rx));
-    rx->uart = uart;
-    if (HAL_UART_Receive_IT(uart, &rx->byte, 1U) != HAL_OK) rx->broken = 1U;
-}
-void Serial_RxCallback(SerialRx *rx, UART_HandleTypeDef *uart)
-{
-    uint16_t next;
-    if (rx->uart != uart) return;
-    next = (uint16_t)((rx->head + 1U) % SERIAL_RX_SIZE);
-    if (next == rx->tail) rx->broken = 1U;
-    if (!rx->broken) {
-        rx->data[rx->head] = rx->byte;
-        rx->tick[rx->head] = HAL_GetTick();
-        __DMB();
-        rx->head = next;
-    }
-    if (HAL_UART_Receive_IT(uart, &rx->byte, 1U) != HAL_OK) rx->broken = 1U;
-}
-void Serial_ErrorCallback(SerialRx *rx, UART_HandleTypeDef *uart)
-{
-    if (rx->uart == uart) rx->broken = 1U;
-}
-uint8_t Serial_Recover(SerialRx *rx)
-{
-    uint8_t broken;
-    uint32_t mask = __get_PRIMASK();
-    __disable_irq();
-    broken = rx->broken;
-    if (broken) {
-        rx->tail = rx->head;
-        rx->broken = 0U;
-    }
-    if (rx->uart->RxState == HAL_UART_STATE_READY) {
-        if (HAL_UART_Receive_IT(rx->uart, &rx->byte, 1U) != HAL_OK) rx->broken = 1U;
-    }
-    __set_PRIMASK(mask);
-    return broken;
-}
-uint8_t Serial_Pop(SerialRx *rx, uint8_t *byte, uint32_t *tick)
-{
-    if (rx->tail == rx->head || rx->broken) return 0U;
-    __DMB();
-    *byte = rx->data[rx->tail];
-    *tick = rx->tick[rx->tail];
-    __DMB();
-    rx->tail = (uint16_t)((rx->tail + 1U) % SERIAL_RX_SIZE);
-    return 1U;
-}
-uint8_t Serial_Peek(const SerialRx *rx, uint8_t *byte)
-{
-    if (rx->tail == rx->head || rx->broken) return 0U;
-    __DMB();
-    *byte = rx->data[rx->tail];
-    return 1U;
+    const UartTxQueueConfig_t config = {
+        .policy = UART_QUEUE_FIFO, .capacity = 15U, .frame_size = 80U,
+        .timeout_ms = 200U, .retain_failed = 1U
+    };
+    if (!initialized && UART_TxQueue_Init(&queue, &huart1, &config, &logs[0][0],
+                                         lengths, NULL, current) == HAL_OK) initialized = 1U;
 }
 void Debug_Log(const char *text)
 {
-    uint8_t next = (uint8_t)((log_head + 1U) % 16U);
-    if (next == log_tail) return; /* Logs never hold up safety processing. */
-    (void)strncpy(logs[log_head], text, sizeof(logs[0]) - 1U);
-    logs[log_head][sizeof(logs[0]) - 1U] = '\0';
-    log_head = next;
+    size_t length = 0U;
+    uint8_t *destination;
+    if (text == NULL) return;
+    Init(); if (!initialized) return;
+    while (length < 79U && text[length] != '\0') ++length;
+    if (length == 0U) return;
+    destination = UART_TxQueue_Reserve(&queue);
+    if (destination == NULL) return;
+    memcpy(destination, text, length); destination[length] = '\0';
+    (void)UART_TxQueue_Commit(&queue, length, 0U);
 }
 uint8_t Debug_CanLog(uint8_t count)
 {
-    return (uint8_t)(((log_tail + 16U - log_head - 1U) % 16U) >= count);
+    Init(); return (uint8_t)(initialized && UART_TxQueue_Free(&queue) >= count);
 }
 void Debug_TxCallback(UART_HandleTypeDef *uart)
 {
-    if (uart == &huart1) log_active = 0U;
+    if (initialized && uart == &huart1) UART_TxQueue_Complete(&queue);
 }
 void Debug_Process(void)
 {
-    static char tx[80];
-    if (log_active && (uint32_t)(HAL_GetTick() - log_tick) > 200U) {
-        (void)HAL_UART_AbortTransmit(&huart1);
-        log_active = 0U;
-    }
-    if (log_active || log_head == log_tail) return;
-    memcpy(tx, logs[log_tail], sizeof(tx));
-    log_active = 1U;
-    log_tick = HAL_GetTick();
-    if (HAL_UART_Transmit_IT(&huart1, (uint8_t *)tx, (uint16_t)strlen(tx)) == HAL_OK)
-        log_tail = (uint8_t)((log_tail + 1U) % 16U);
-    else log_active = 0U;
+    Init(); if (initialized) (void)UART_TxQueue_Process(&queue);
 }

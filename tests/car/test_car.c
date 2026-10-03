@@ -1,3 +1,5 @@
+#include "board_inputs.h"
+#include "board_input_config.h"
 #include "bluetooth_driver.h"
 #include "motor_driver.h"
 #include "car_control.h"
@@ -9,16 +11,17 @@
 #include "pid_tuner.h"
 #include "mock_maxicam.h"
 #include "laser.h"
-#include "servo_remote.h"
-#include "servo_pose.h"
-#include "arm_tuner.h"
+#include "board_inputs.h"
+#include "servo.h"
+#include "remote_heading.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <limits.h>
 #include <math.h>
 #include <float.h>
-UART_HandleTypeDef huart1, huart5, huart6;
+UART_HandleTypeDef huart1, huart3, huart5, huart6;
+GPIO_TypeDef mock_gpiob, mock_gpioc, mock_gpiod, mock_gpioe;
 I2C_HandleTypeDef hi2c1;
 static uint32_t now;
 static uint8_t stall_motor;
@@ -26,65 +29,26 @@ static uint8_t pd10_low;
 static uint8_t pe0_low, pe4_low;
 static uint8_t pc1_low, test_laser_on;
 static unsigned test_laser_enable_count;
-static unsigned test_servo_pose_calls;
-static unsigned test_original_pose_calls, test_servo_reset_calls;
-static ArmStep_t test_servo_last_step;
-static ArmResult_t test_servo_result;
-static ArmStatus_t test_arm_status;
-static uint8_t test_arm_hold, test_tuner_session;
-ArmResult_t Arm_SetMotionAllowed(bool allowed)
+static unsigned test_servo_pose_calls, test_servo_aim_calls;
+extern unsigned mock_reset_count;
+extern HAL_StatusTypeDef mock_reset_result;
+void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *gpio)
 {
-    test_arm_status.motion_allowed = allowed;
-    if (!allowed && test_arm_status.state == ARM_RUNNING)
-        test_arm_status.state = ARM_CANCELLED;
-    return ARM_OK;
+    assert(port == GPIOB || port == GPIOC || port == GPIOD || port == GPIOE);
+    assert(gpio->Mode == GPIO_MODE_INPUT && gpio->Pull == GPIO_PULLUP);
 }
-ArmResult_t Arm_StartSequence(const ArmStep_t *step, size_t count)
+void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
+{ (void)port; (void)pin; (void)state; }
+void Laser_SetManualRequest(bool requested) { (void)requested; }
+static void SyncInputs(void)
 {
-    assert(step != NULL && count == 1U && test_arm_status.motion_allowed);
-    if (test_servo_result != ARM_OK) return test_servo_result;
-    test_servo_last_step = *step;
-    ++test_servo_pose_calls;
-    test_arm_status.state = test_arm_hold ? ARM_RUNNING : ARM_COMPLETE_ESTIMATED;
-    return ARM_OK;
+    mock_gpiob.IDR = UINT16_MAX;
+    mock_gpioc.IDR = UINT16_MAX & (pc1_low ? (uint32_t)~GPIO_PIN_1 : UINT16_MAX);
+    mock_gpiod.IDR = UINT16_MAX & (pd10_low ? (uint32_t)~GPIO_PIN_10 : UINT16_MAX);
+    mock_gpioe.IDR = UINT16_MAX;
+    if (pe0_low) mock_gpioe.IDR &= ~GPIO_PIN_0;
+    if (pe4_low) mock_gpioe.IDR &= ~GPIO_PIN_4;
 }
-ArmResult_t Arm_StartOriginalPreset(const ArmStep_t *step)
-{
-    ArmResult_t result = Arm_StartSequence(step, 1U);
-    if (result == ARM_OK) ++test_original_pose_calls;
-    return result;
-}
-ArmResult_t Arm_ResetController(void)
-{
-    if (test_arm_status.motion_allowed || test_arm_status.state == ARM_RUNNING)
-        return ARM_BUSY;
-    if (test_servo_result != ARM_OK) return test_servo_result;
-    ++test_servo_reset_calls;
-    test_arm_status.state = ARM_IDLE;
-    return ARM_OK;
-}
-ArmResult_t Arm_SendImmediate(const ArmStep_t *step)
-{
-    assert(step != NULL);
-    if (test_servo_result != ARM_OK) return test_servo_result;
-    test_servo_last_step = *step;
-    ++test_servo_pose_calls;
-    test_arm_status.motion_allowed = true;
-    test_arm_status.state = test_arm_hold ? ARM_RUNNING : ARM_COMPLETE_ESTIMATED;
-    return ARM_OK;
-}
-ArmResult_t Arm_Stop(void)
-{
-    test_arm_status.motion_allowed = false;
-    test_arm_status.state = ARM_CANCELLED;
-    return ARM_OK;
-}
-ArmStatus_t Arm_GetStatus(void) { return test_arm_status; }
-uint8_t ArmTuner_IsSessionActive(void) { return test_tuner_session; }
-uint8_t Board_PD10IsLow(void) { return pd10_low; }
-uint8_t Board_VisionButtonIsLow(void) { return pe0_low; }
-uint8_t Board_ShotButtonIsLow(void) { return pc1_low; }
-uint8_t Board_ServoButtonIsLow(void) { return pe4_low; }
 void Laser_Enable(void) { test_laser_on = 1U; ++test_laser_enable_count; }
 void Laser_Disable(void) { test_laser_on = 0U; }
 bool Laser_IsEnabled(void) { return test_laser_on != 0U; }
@@ -110,6 +74,13 @@ HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *u, uint8_t *p, uint16_
 }
 HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *u, const uint8_t *p, uint16_t n)
 {
+    if (u == &huart3) {
+        ++test_servo_pose_calls;
+        if (n == 62U && memcmp(p, "{#000P1058T2000!", 16U) == 0) ++test_servo_aim_calls;
+        u->gState = HAL_UART_STATE_READY;
+        HAL_UART_TxCpltCallback(u);
+        return HAL_OK;
+    }
     if (u==&huart6 && next_bt_tx_result!=HAL_OK) {
         HAL_StatusTypeDef r=next_bt_tx_result; next_bt_tx_result=HAL_OK; return r;
     }
@@ -151,7 +122,8 @@ static void Complete(UART_HandleTypeDef *u)
 }
 static void Loop(void)
 {
-    Bluetooth_Process(); Car_Control_Process(); Motor_Process(); Car_Control_Process(); ServoRemote_Process(); PID_Tuner_Process(); Debug_Process();
+    SyncInputs(); Bluetooth_Process(); BoardInputs_ProcessControl(); Car_Control_Process(); Motor_Process(); Car_Control_Process();
+    PID_Tuner_Process(); Bluetooth_DispatchServoActions(BoardInputs_TakeServoAimPress()); Debug_Process();
 }
 static void Step(unsigned ms)
 {
@@ -206,29 +178,45 @@ static void ControlFrame(BluetoothControlFrame c)
     PackControl(p,&c); Inject(&huart6,p,sizeof(p)); Bluetooth_Process();
     /* These safety fields are not present in the active phone .pro. Keep the
      * existing control-layer safety tests by injecting them after wire decode. */
-    ((BtControl_t *)Bluetooth_GetControl())->frame.brake = c.brake;
-    ((BtControl_t *)Bluetooth_GetControl())->frame.disable = c.disable;
+    const BluetoothControlFrame *decoded = &Bluetooth_GetControl()->frame;
+    CarRemoteInput_t input = {
+        .command = { .joy_x=decoded->joy_x, .joy_y=decoded->joy_y,
+            .forward=decoded->forward, .backward=decoded->backward, .stop=decoded->stop,
+            .strafe_left=decoded->strafe_left, .strafe_right=decoded->strafe_right,
+            .right_90=decoded->right_90, .right_180=decoded->right_180, .left_90=decoded->left_90,
+            .vision_follow=decoded->Cam_T, .shot=decoded->Shot, .brake=c.brake, .disable=c.disable },
+        .sequence=Bluetooth_GetSequence(), .received_tick=Bluetooth_GetLastRxTick(), .valid=1U
+    };
+    Car_Control_SubmitRemoteInput(&input);
     Loop();
 }
+/* Translation stimulus for safety/heading tests, independent of JOY mode. */
+static void ButtonFrame(int16_t brake, int16_t off, int16_t forward)
+{
+    BluetoothControlFrame c = {0};
+    c.brake = brake; c.disable = off;
+    c.forward = forward > 0; c.backward = forward < 0;
+    ControlFrame(c);
+}
+
 static void Reset(uint32_t tick)
 {
+    mock_reset_count = 0U; mock_reset_result = HAL_OK;
     now = tick; stall_motor = 0U; next_tx_result = HAL_OK;
     stall_bt=0U; next_bt_tx_result=HAL_OK; bt_sent_count=0U;
     bt_inflight=NULL; bt_inflight_length=0U; bt_start_tick=now; bt_wire_ms=0U;
     pd10_low = pe0_low = pe4_low = pc1_low = test_laser_on = 0U;
     test_laser_enable_count = 0U; bt_frame_ok_count = 0U;
-    test_servo_pose_calls = 0U; test_servo_result = ARM_OK;
-    test_original_pose_calls = test_servo_reset_calls = 0U;
-    test_arm_hold = test_tuner_session = 0U;
-    memset(&test_servo_last_step, 0, sizeof(test_servo_last_step));
-    memset(&test_arm_status, 0, sizeof(test_arm_status));
-    test_arm_status.state = ARM_IDLE;
+    test_servo_pose_calls = test_servo_aim_calls = 0U;
     bt_forward_frame_count = bt_control_forward_count = 0U;
     memset(&huart1,0,sizeof(huart1)); memset(&huart5,0,sizeof(huart5)); memset(&huart6,0,sizeof(huart6));
     huart1.RxState = huart5.RxState = huart6.RxState = HAL_UART_STATE_READY;
     Debug_TxCallback(&huart1);
     JY61_Init(); Bluetooth_Init(); Motor_Init(); TestMaxiCam_Reset(); Car_Control_Init();
-    ServoRemote_Init();
+    SyncInputs(); BoardInputs_Init();
+    memset(&huart3, 0, sizeof(huart3)); huart3.Instance = &huart3;
+    huart3.Init.BaudRate = SERVO_BAUD_RATE; huart3.Init.Mode = UART_MODE_TX_RX;
+    huart3.gState = HAL_UART_STATE_READY; assert(Servo_Init(&huart3) == SERVO_OK);
     PID_Tuner_Init();
     sent_count = 0U;
     Step(40U); assert(Motor_IsIdle());
@@ -241,8 +229,8 @@ static void Reset(uint32_t tick)
 }
 static void Ready(void)
 {
-    Frame(0,0,0,1000); assert(Car_Control_GetState()==CAR_WAIT_CENTER);
-    Step(40U); Frame(0,0,0,1000); assert(Car_Control_GetState()==CAR_WAIT_CENTER);
+    ButtonFrame(0,0,1); assert(Car_Control_GetState()==CAR_WAIT_CENTER);
+    Step(40U); ButtonFrame(0,0,1); assert(Car_Control_GetState()==CAR_WAIT_CENTER);
     Frame(0,0,0,0); assert(Car_Control_GetState()==CAR_READY);
 }
 static unsigned Count(uint8_t cmd)
@@ -256,6 +244,10 @@ static void AssertLatestPhysicalSpeed(uint8_t address, int16_t rpm)
         if (sent[i].bytes[0]==address && sent[i].bytes[1]==0xF6U) {
             int16_t actual=(int16_t)((uint16_t)sent[i].bytes[3]*256U+sent[i].bytes[4]);
             if (sent[i].bytes[2]) actual=(int16_t)-actual;
+            if (sent[i].length != 8U || actual != rpm)
+                fprintf(stderr, "wheel %u speed: expected %d, got %d at %lu ms\n",
+                        (unsigned)address, (int)rpm, (int)actual,
+                        (unsigned long)now);
             assert(sent[i].length==8U && actual==rpm);
             return;
         }
@@ -411,35 +403,38 @@ static void TestIndependentButtons(void)
     c.backward = 1; ControlFrame(c); Step(40U);
     AssertLatestPhysicalSpeed(1U, BLUETOOTH_TEST_MOVE_RPM);
     AssertLatestPhysicalSpeed(2U, -BLUETOOTH_TEST_MOVE_RPM);
+    AssertLatestPhysicalSpeed(3U, -BLUETOOTH_TEST_MOVE_RPM);
+    AssertLatestPhysicalSpeed(4U, BLUETOOTH_TEST_MOVE_RPM);
     c.backward = 0; ControlFrame(c); Step(40U);
     c.strafe_left = 1; ControlFrame(c); Step(40U);
     AssertLatestPhysicalSpeed(1U, BLUETOOTH_TEST_MOVE_RPM);
     AssertLatestPhysicalSpeed(2U, BLUETOOTH_TEST_MOVE_RPM);
+    AssertLatestPhysicalSpeed(3U, -BLUETOOTH_TEST_MOVE_RPM);
+    AssertLatestPhysicalSpeed(4U, -BLUETOOTH_TEST_MOVE_RPM);
     c.strafe_left = 0; ControlFrame(c); Step(40U);
     c.strafe_right = 1; ControlFrame(c); Step(40U);
     AssertLatestPhysicalSpeed(1U, -BLUETOOTH_TEST_MOVE_RPM);
     AssertLatestPhysicalSpeed(2U, -BLUETOOTH_TEST_MOVE_RPM);
+    AssertLatestPhysicalSpeed(3U, BLUETOOTH_TEST_MOVE_RPM);
+    AssertLatestPhysicalSpeed(4U, BLUETOOTH_TEST_MOVE_RPM);
     c.strafe_right = 0; ControlFrame(c); Step(40U);
     c.forward = c.backward = 1; speed = Count(0xF6); ControlFrame(c); Step(40U);
     assert(Car_Control_GetState() == CAR_READY && Count(0xF6) == speed);
     c.forward = c.backward = 0; c.strafe_left = c.strafe_right = 1;
     ControlFrame(c); Step(40U); assert(Count(0xF6) == speed);
-    c.strafe_left = c.strafe_right = 0; c.joy_x = 600;
+    c.strafe_left = c.strafe_right = 0; c.forward = 1;
     ControlFrame(c); Step(40U);
     assert(Car_Control_GetState() == CAR_RUNNING);
-    AssertLatestPhysicalSpeed(1U, -300); AssertLatestPhysicalSpeed(2U, -300);
-    c.joy_x = 0; c.joy_y = 600; ControlFrame(c); Step(40U);
-    AssertLatestPhysicalSpeed(1U, -300); AssertLatestPhysicalSpeed(2U, 300);
     c.stop = 1; ControlFrame(c); Step(40U);
     assert(Car_Control_GetState() == CAR_BRAKE_LOCK);
     speed = Count(0xF6);
     c.stop = 0; ControlFrame(c); Step(40U);
     assert(Car_Control_GetState() == CAR_BRAKE_LOCK && Count(0xF6) == speed);
-    c.joy_y = 0; ControlFrame(c); Step(40U);
+    c.forward = 0; ControlFrame(c); Step(40U);
     assert(Car_Control_GetState() == CAR_READY);
-    c.joy_y = 600; ControlFrame(c); Step(40U);
+    c.forward = 1; ControlFrame(c); Step(40U);
     assert(Car_Control_GetState() == CAR_RUNNING);
-    c.joy_y = 0; stopped = Count(0xFE); ControlFrame(c); Step(40U);
+    c.forward = 0; stopped = Count(0xFE); ControlFrame(c); Step(40U);
     assert(Car_Control_GetState() == CAR_READY && Count(0xFE) == stopped + 4U);
     assert(Heading_GetStatus()->omega_final == 0);
     c.brake = 1; ControlFrame(c); assert(Car_Control_GetState() == CAR_BRAKE_LOCK);
@@ -451,154 +446,79 @@ static void TestIndependentButtons(void)
     puts("PASS independent buttons: four vectors / release / conflicts / joystick / STOP lock / internal BRAKE/DISABLE");
 }
 
+static void FinishRemoteTurn(BluetoothControlFrame c, float yaw)
+{
+    unsigned i;
+    while (yaw > 180.0f) yaw -= 360.0f;
+    while (yaw < -180.0f) yaw += 360.0f;
+    ImuSample(yaw, 0); Loop(); Step(30U);
+    for (i = 0U; i < 15U; ++i) {
+        Step(10U); ImuSample(yaw, 0); ControlFrame(c);
+    }
+    assert(TurnRight_GetStatus()->state == TURN_RIGHT_DONE);
+    assert(mock_reset_count == 0U);
+}
+
 static void TestIndependentTurns(void)
 {
     BluetoothControlFrame c = {0};
-    unsigned speed, i;
-    Reset(0U); Ready(); ImuSample(15.0f, 0.0f); Loop();
+    unsigned before;
+    Reset(0U); Ready(); ImuSample(15,0); Loop();
     c.right_90 = 1; ControlFrame(c); Step(40U);
     assert(Car_Control_GetState() == CAR_TURNING);
     AssertLatestPhysicalSpeed(1U, TURN_RIGHT_90_RPM);
-    AssertLatestPhysicalSpeed(2U, TURN_RIGHT_90_RPM);
-    AssertLatestPhysicalSpeed(3U, TURN_RIGHT_90_RPM);
-    AssertLatestPhysicalSpeed(4U, TURN_RIGHT_90_RPM);
-    speed = Count(0xF6);
-    ImuSample(15.0f, 0.0f); ControlFrame(c); Step(40U); assert(Count(0xF6) == speed);
-    c.right_90 = 0; ImuSample(15.0f, 0.0f); ControlFrame(c); Step(40U);
-    assert(Car_Control_GetState() == CAR_TURNING);
-    c.right_180 = 1; ImuSample(15.0f, 0.0f); ControlFrame(c); Step(40U);
-    assert(Car_Control_GetState() == CAR_TURNING && Count(0xF6) == speed);
-    c.right_90 = 1; ControlFrame(c); Step(40U);
+    before = Count(0xF6); ControlFrame(c); Step(30U); assert(Count(0xF6) == before);
+    FinishRemoteTurn(c, -75);
+    assert(RemoteHeading_GetStatus()->direction == REMOTE_RIGHT);
     assert(Car_Control_GetState() == CAR_READY);
-    c.right_90 = c.right_180 = 0; ControlFrame(c); Step(40U);
-    ImuSample(25.0f, 0.0f); Loop();
+    before = Count(0xF6); ControlFrame(c); Step(30U); assert(Count(0xF6) == before);
+    c.right_90 = 0; ControlFrame(c);
     c.right_180 = 1; ControlFrame(c); Step(40U);
-    assert(Car_Control_GetState() == CAR_TURNING);
     AssertLatestPhysicalSpeed(1U, TURN_RIGHT_180_RPM);
-    AssertLatestPhysicalSpeed(2U, TURN_RIGHT_180_RPM);
-    AssertLatestPhysicalSpeed(3U, TURN_RIGHT_180_RPM);
-    AssertLatestPhysicalSpeed(4U, TURN_RIGHT_180_RPM);
-    speed = Count(0xF6);
-    ControlFrame(c); Step(40U); assert(Count(0xF6) == speed);
-    c.stop = 1; ControlFrame(c); Step(40U);
-    assert(Car_Control_GetState() == CAR_BRAKE_LOCK);
-    c.stop = c.right_180 = 0; ControlFrame(c); Step(40U);
-    assert(Car_Control_GetState() == CAR_READY);
-    ImuSample(30.0f, 0.0f); ControlFrame(c);
+    ImuSample(-165, -20); Loop(); Step(10U);
+    FinishRemoteTurn(c, 105);
+    assert(RemoteHeading_GetStatus()->direction == REMOTE_LEFT);
+    c.right_180 = 0; ControlFrame(c);
+    c.right_90 = 1; ControlFrame(c); Step(30U);
     c.right_180 = 1; ControlFrame(c); Step(40U);
-    assert(Car_Control_GetState() == CAR_TURNING && Count(0xF6) > speed);
+    assert(Car_Control_GetState() == CAR_READY);
+    assert(RemoteHeading_GetStatus()->direction == REMOTE_LEFT);
+    c.right_90 = c.right_180 = 0; ControlFrame(c);
+    c.right_90 = 1; ImuSample(105,0); ControlFrame(c); Step(30U);
+    assert(Car_Control_GetState() == CAR_TURNING);
     c.stop = 1; ControlFrame(c); Step(40U);
-    c.stop = c.right_180 = 0; ControlFrame(c); Step(40U);
-    assert(Car_Control_GetState() == CAR_READY);
-    speed = Count(0xF6);
-    ImuSample(35.0f, 0.0f); ControlFrame(c);
-    c.right_90 = 1; ControlFrame(c); Step(40U);
-    assert(Car_Control_GetState() == CAR_TURNING && Count(0xF6) > speed);
-    speed = Count(0xF6);
-    {
-        unsigned stopped = Count(0xFE);
-        ImuSample(-56.0f, -20.0f); Loop(); Step(40U);
-        assert(TurnRight_GetStatus()->state == TURN_RIGHT_STOPPING);
-        assert(Count(0xFE) >= stopped + 4U && Count(0xF6) == speed);
-    }
-    for (i = 0U; i < 14U; ++i) {
-        Step(10U); ImuSample(-56.0f, 0.0f); Loop();
-    }
-    assert(TurnRight_GetStatus()->state == TURN_RIGHT_RESETTING);
-    Step(10U); ImuSample(0.0f, 0.0f); Loop();
-    assert(Car_Control_GetState() == CAR_READY);
-    ControlFrame(c); Step(40U);
-    assert(Car_Control_GetState() == CAR_READY && Count(0xF6) == speed);
-    puts("PASS independent turns: 90/180 edge / held no retrigger / 0-1 rearm / completion / conflict / STOP cancel");
+    assert(Car_Control_GetState() == CAR_BRAKE_LOCK && mock_reset_count == 0U);
+    puts("PASS remote turns: edge/hold/rearm, 90/180 composition, persistent coordinates, conflicts and STOP");
 }
 
 static void TestTranslationAfterTurn(void)
 {
     BluetoothControlFrame c = {0};
-    unsigned i;
-    const int16_t move_rpm = BLUETOOTH_TEST_MOVE_RPM;
-    const int16_t correction = move_rpm * MANUAL_HEADING_LIMIT_PERCENT / 100;
-    Reset(0U); Ready(); ImuSample(0.0f, 0.0f); Loop();
-    c.right_90 = 1; ControlFrame(c); Step(40U);
-    c.right_90 = 0; ControlFrame(c); Step(40U);
-    ImuSample(-86.0f, -20.0f); Loop(); Step(40U);
-    assert(TurnRight_GetStatus()->state == TURN_RIGHT_STOPPING);
-    for (i = 0U; i < 14U; ++i) {
-        Step(10U); ImuSample(-90.0f, 0.0f); Loop();
-    }
-    assert(TurnRight_GetStatus()->state == TURN_RIGHT_RESETTING);
-    Step(10U); ImuSample(0.0f, 0.0f); Loop();
-    assert(Car_Control_GetState() == CAR_READY);
-    assert(fabsf(Heading_GetStatus()->yaw_zero) < 2.0f);
-
-    c.forward = 1; ControlFrame(c); Step(40U);
-    AssertLatestPhysicalSpeed(1U, -move_rpm);
-    AssertLatestPhysicalSpeed(2U, move_rpm);
-    AssertLatestPhysicalSpeed(3U, move_rpm);
-    AssertLatestPhysicalSpeed(4U, -move_rpm);
-    AssertLatestSyncTransaction();
-
-    ImuSample(100.0f, 0.0f); Loop(); Step(40U);
-    assert(Heading_GetStatus()->yaw_error < -99.0f &&
-           Heading_GetStatus()->omega_final >= 49);
-    AssertLatestPhysicalSpeed(1U, -move_rpm + correction);
-    AssertLatestPhysicalSpeed(2U, move_rpm + correction);
-    AssertLatestPhysicalSpeed(3U, move_rpm + correction);
-    AssertLatestPhysicalSpeed(4U, -move_rpm + correction);
-    AssertLatestSyncTransaction();
-
-    ImuSample(-100.0f, 0.0f); Loop(); Step(40U);
-    assert(Heading_GetStatus()->yaw_error > 99.0f &&
-           Heading_GetStatus()->omega_final <= -49);
-    AssertLatestPhysicalSpeed(1U, -move_rpm - correction);
-    AssertLatestPhysicalSpeed(2U, move_rpm - correction);
-    AssertLatestPhysicalSpeed(3U, move_rpm - correction);
-    AssertLatestPhysicalSpeed(4U, -move_rpm - correction);
-    AssertLatestSyncTransaction();
-
-    ImuSample(100.0f, 0.0f); Loop(); Step(40U);
-    c.forward = 0; c.backward = 1; ControlFrame(c); Step(40U);
-    AssertLatestPhysicalSpeed(1U, move_rpm + correction);
-    AssertLatestPhysicalSpeed(2U, -move_rpm + correction);
-    AssertLatestPhysicalSpeed(3U, -move_rpm + correction);
-    AssertLatestPhysicalSpeed(4U, move_rpm + correction);
-    AssertLatestSyncTransaction();
-
-    ImuSample(100.0f, 0.0f); Loop();
-    c.backward = 0; c.strafe_left = 1; ControlFrame(c); Step(40U);
-    AssertLatestPhysicalSpeed(1U, move_rpm + correction);
-    AssertLatestPhysicalSpeed(2U, move_rpm + correction);
-    AssertLatestPhysicalSpeed(3U, -move_rpm + correction);
-    AssertLatestPhysicalSpeed(4U, -move_rpm + correction);
-    AssertLatestSyncTransaction();
-
-    ImuSample(100.0f, 0.0f); Loop();
-    c.strafe_left = 0; c.strafe_right = 1; ControlFrame(c); Step(40U);
-    AssertLatestPhysicalSpeed(1U, -move_rpm + correction);
-    AssertLatestPhysicalSpeed(2U, -move_rpm + correction);
-    AssertLatestPhysicalSpeed(3U, move_rpm + correction);
-    AssertLatestPhysicalSpeed(4U, move_rpm + correction);
-    AssertLatestSyncTransaction();
-
-    Reset(0U); Ready(); ImuSample(0.0f, 0.0f); Loop();
-    memset(&c, 0, sizeof(c));
-    c.right_180 = 1; ControlFrame(c); Step(40U);
-    c.right_180 = 0; ControlFrame(c); Step(40U);
-    ImuSample(-176.0f, -20.0f); Loop(); Step(40U);
-    assert(TurnRight_GetStatus()->state == TURN_RIGHT_STOPPING);
-    for (i = 0U; i < 14U; ++i) {
-        Step(10U); ImuSample(-180.0f, 0.0f); Loop();
-    }
-    assert(TurnRight_GetStatus()->state == TURN_RIGHT_RESETTING);
-    Step(10U); ImuSample(0.0f, 0.0f); Loop();
-    assert(Car_Control_GetState() == CAR_READY);
-    c.forward = 1; ControlFrame(c); Step(40U);
-    AssertLatestPhysicalSpeed(1U, -move_rpm);
-    AssertLatestPhysicalSpeed(2U, move_rpm);
-    AssertLatestPhysicalSpeed(3U, move_rpm);
-    AssertLatestPhysicalSpeed(4U, -move_rpm);
-    AssertLatestSyncTransaction();
-    puts("PASS translation after 90/180: heading zero / signed and capped correction / four nonzero speeds / sync");
+    Reset(0U); Ready(); ImuSample(0,0); Loop();
+    c.right_90 = 1; ControlFrame(c); Step(30U);
+    FinishRemoteTurn(c, -90);
+    c.right_90 = 0; c.forward = 1; ControlFrame(c); Step(40U);
+    AssertLatestPhysicalSpeed(1U, -BLUETOOTH_TEST_MOVE_RPM);
+    AssertLatestPhysicalSpeed(2U, BLUETOOTH_TEST_MOVE_RPM);
+    ImuSample(-87,0); Loop(); Step(40U);
+    assert(RemoteHeading_GetStatus()->phase == REMOTE_DRIFTING);
+    Step(30U);
+    AssertLatestPhysicalSpeed(1U, (int16_t)(-BLUETOOTH_TEST_MOVE_RPM +
+        RemoteHeading_GetStatus()->correction_rpm));
+    AssertLatestPhysicalSpeed(2U, (int16_t)(BLUETOOTH_TEST_MOVE_RPM +
+        RemoteHeading_GetStatus()->correction_rpm));
+    c.forward = 0; ControlFrame(c); Step(20U);
+    assert(RemoteHeading_GetStatus()->phase == REMOTE_ALIGNING);
+    ImuSample(-90,0); Loop(); Step(40U);
+    assert(Car_Control_GetState() == CAR_READY && RemoteHeading_GetStatus()->direction == REMOTE_RIGHT);
+    c.backward = 1; ControlFrame(c); Step(40U);
+    AssertLatestPhysicalSpeed(1U, BLUETOOTH_TEST_MOVE_RPM);
+    AssertLatestPhysicalSpeed(2U, -BLUETOOTH_TEST_MOVE_RPM);
+    c.backward = 0; ControlFrame(c); Step(30U);
+    ImuSample(-93,0); Loop(); Step(40U);
+    AssertLatestPhysicalSpeed(1U,-1); AssertLatestPhysicalSpeed(2U,-1);
+    assert(RemoteHeading_GetStatus()->direction == REMOTE_RIGHT && mock_reset_count == 0U);
+    puts("PASS post-turn hold: common reference, correction mixed while driving, stationary alignment after release");
 }
 
 static void TestTurnWrongWayLocks(void)
@@ -642,8 +562,8 @@ static void TestTurnSettledCorrection(void)
     for (i = 0U; i < 14U; ++i) {
         Step(10U); ImuSample(-94.0f, 0.0f); Loop();
     }
-    assert(TurnRight_GetStatus()->state == TURN_RIGHT_RESETTING);
-    Step(10U); ImuSample(0.0f, 0.0f); Loop();
+    assert(TurnRight_GetStatus()->state == TURN_RIGHT_DONE);
+    Step(10U); ImuSample(-90.0f, 0.0f); Loop(); Step(40U);
     assert(Car_Control_GetState() == CAR_READY);
     puts("PASS turn correction: Bluetooth stays turning through reverse 20 RPM and completes only after settled tolerance");
 }
@@ -687,142 +607,183 @@ static void TestMotor(void)
 }
 static void TestControl(void)
 {
-    unsigned before,i;
-    uint8_t a[BT_CONTROL_FRAME_SIZE],b[BT_CONTROL_FRAME_SIZE],burst[2U*BT_CONTROL_FRAME_SIZE];
-    Reset(0U); Frame(0,0,0,1000);Step(30);assert(sent_count==0U);
-    Ready();assert(Count(0xF3)==0U);
-    Frame(0,0,0,1000);Step(35);assert(Car_Control_GetState()==CAR_RUNNING);
-    /* Straight: logical [500,500,500,500], then installation signs. */
-    AssertLatestPhysicalSpeed(1U,-500);AssertLatestPhysicalSpeed(2U,500);
-    AssertLatestPhysicalSpeed(3U,500);AssertLatestPhysicalSpeed(4U,-500);
-    Frame(0,0,1000,0);Step(35);assert(Car_Control_GetState()==CAR_RUNNING);
-    /* X is right translation, never continuous rotation. */
-    AssertLatestPhysicalSpeed(1U,-500);AssertLatestPhysicalSpeed(2U,-500);
-    AssertLatestPhysicalSpeed(3U,500);AssertLatestPhysicalSpeed(4U,500);
-    Frame(0,0,500,1000);Step(35);assert(Car_Control_GetState()==CAR_RUNNING);
-    /* Continuous 2-D translation; common scaling preserves direction. */
-    AssertLatestPhysicalSpeed(1U,-500);AssertLatestPhysicalSpeed(2U,166);
-    AssertLatestPhysicalSpeed(3U,500);AssertLatestPhysicalSpeed(4U,-166);
-    Frame(0,0,1000,1000);Step(35);assert(Car_Control_GetState()==CAR_RUNNING);
-    /* Right-forward 45 degrees: M1/M3 only for this X layout. */
-    AssertLatestPhysicalSpeed(1U,-500);AssertLatestPhysicalSpeed(2U,0);
-    AssertLatestPhysicalSpeed(3U,500);AssertLatestPhysicalSpeed(4U,0);
-    Frame(0,0,-1000,1000);Step(35);assert(Car_Control_GetState()==CAR_RUNNING);
-    AssertLatestPhysicalSpeed(1U,0);AssertLatestPhysicalSpeed(2U,500);
-    AssertLatestPhysicalSpeed(3U,0);AssertLatestPhysicalSpeed(4U,-500);
-    before=Count(0xFE);Frame(0,0,50,-50);Step(40);assert(Car_Control_GetState()==CAR_READY && Count(0xFE)==before+4U);
-    Frame(0,0,0,-1000);Step(30);assert(Car_Control_GetState()==CAR_RUNNING);
-    Pack(a,1,0,0,-1000);Pack(b,0,0,0,-1000);memcpy(burst,a,BT_CONTROL_FRAME_SIZE);memcpy(burst+BT_CONTROL_FRAME_SIZE,b,BT_CONTROL_FRAME_SIZE);
-    Inject(&huart6,burst,sizeof(burst));Loop();assert(Car_Control_GetState()==CAR_BRAKE_LOCK);Step(40);
-    assert(Car_Control_GetState()==CAR_BRAKE_LOCK && Count(0xFE)==before+8U);
-    before=Count(0xF6);Step(40);assert(Count(0xF6)==before);
-    Frame(0,0,0,0);assert(Car_Control_GetState()==CAR_READY);
-    Frame(0,0,0,1000);Step(30);assert(Car_Control_GetState()==CAR_RUNNING);
-    Frame(1,1,0,1000);assert(Car_Control_GetState()==CAR_OFF);Step(40);
-    before=sent_count;Frame(0,1,0,1000);Step(40);assert(Car_Control_GetState()==CAR_OFF && sent_count==before);
-    for(i=0;i<sent_count;++i) if(sent[i].bytes[1]==0xFF) assert(sent[i].length==4U);
-    puts("PASS control: automatic enable/center guard/X-right translation/2-D mixing/brake burst/lock release/disable priority");
+    BluetoothControlFrame c = {0};
+    uint8_t burst[2U * BT_CONTROL_FRAME_SIZE];
+    unsigned before;
+    Reset(0U); Ready();
+    ButtonFrame(0,0,1); Step(35U);
+    assert(Car_Control_GetState() == CAR_RUNNING);
+    AssertLatestPhysicalSpeed(1U, -BLUETOOTH_TEST_MOVE_RPM);
+    AssertLatestPhysicalSpeed(2U, BLUETOOTH_TEST_MOVE_RPM);
+    AssertLatestSyncTransaction();
+    c.forward = 1; c.stop = 1; PackControl(burst, &c);
+    c.stop = 0; PackControl(burst + BT_CONTROL_FRAME_SIZE, &c);
+    before = Count(0xFE);
+    Inject(&huart6, burst, sizeof(burst)); Loop(); Step(40U);
+    assert(Car_Control_GetState() == CAR_BRAKE_LOCK && Count(0xFE) == before + 4U);
+    before = Count(0xF6); Step(40U); assert(Count(0xF6) == before);
+    ButtonFrame(0,0,0); assert(Car_Control_GetState() == CAR_READY);
+    ButtonFrame(0,0,1); Step(30U); assert(Car_Control_GetState() == CAR_RUNNING);
+    ButtonFrame(1,1,1); Step(40U); assert(Car_Control_GetState() == CAR_OFF);
+    before = sent_count; ButtonFrame(0,1,1); Step(40U); assert(sent_count == before);
+    puts("PASS control: button translation / sync / STOP burst / center rearm / disable priority");
 }
 static void TestFailsafe(void)
 {
     unsigned before;
-    Reset(UINT32_MAX-100U);Ready();Frame(0,0,0,1000);Step(40);
+    Reset(UINT32_MAX-100U);Ready();ButtonFrame(0,0,1);Step(40);
     Step(460); assert(Bluetooth_IsConnected()); /* Exactly 500 ms remains connected. */
     Step(1);assert(Car_Control_GetState()==CAR_LINK_LOST);Step(30);
-    before=Count(0xF6);Frame(1,0,0,0);assert(Car_Control_GetState()==CAR_LINK_LOST);
-    Frame(0,0,0,1000);Step(30);assert(Car_Control_GetState()==CAR_LINK_LOST && Count(0xF6)==before);
-    Frame(0,0,0,0);Step(40);assert(Car_Control_GetState()==CAR_LINK_LOST);
-    Frame(1,0,0,0);Frame(0,0,0,0);assert(Car_Control_GetState()==CAR_LINK_LOST);
-    Frame(0,0,0,1000);Frame(0,0,0,0);assert(Car_Control_GetState()==CAR_LINK_LOST);
-    Frame(0,0,0,0);assert(Car_Control_GetState()==CAR_WAIT_CENTER);
-    Frame(0,0,0,1000);Step(40);
+    before=Count(0xF6);ButtonFrame(1,0,0);assert(Car_Control_GetState()==CAR_LINK_LOST);
+    ButtonFrame(0,0,1);Step(30);assert(Car_Control_GetState()==CAR_LINK_LOST && Count(0xF6)==before);
+    ButtonFrame(0,0,0);Step(40);assert(Car_Control_GetState()==CAR_LINK_LOST);
+    ButtonFrame(1,0,0);ButtonFrame(0,0,0);assert(Car_Control_GetState()==CAR_LINK_LOST);
+    ButtonFrame(0,0,1);ButtonFrame(0,0,0);assert(Car_Control_GetState()==CAR_LINK_LOST);
+    ButtonFrame(0,0,0);assert(Car_Control_GetState()==CAR_WAIT_CENTER);
+    ButtonFrame(0,0,1);Step(40);
     assert(Car_Control_GetState()==CAR_WAIT_CENTER && Count(0xF6)==before);
-    Frame(0,0,0,0);assert(Car_Control_GetState()==CAR_READY);
+    ButtonFrame(0,0,0);assert(Car_Control_GetState()==CAR_READY);
     /* RX transport corruption while running forces link loss immediately. */
-    Frame(0,0,0,1000);Step(30);HAL_UART_ErrorCallback(&huart6);Loop();assert(Car_Control_GetState()==CAR_LINK_LOST);
-    Reset(0U);Ready();Frame(0,0,0,1000);stall_motor=1U;Step(50);
+    ButtonFrame(0,0,1);Step(30);HAL_UART_ErrorCallback(&huart6);Loop();assert(Car_Control_GetState()==CAR_LINK_LOST);
+    Reset(0U);Ready();ButtonFrame(0,0,1);stall_motor=1U;Step(50);
     assert(Motor_HasFault() && Car_Control_GetState()==CAR_FAULT);
-    stall_motor=0U;Step(40);Frame(0,0,0,0);Step(40);
+    stall_motor=0U;Step(40);ButtonFrame(0,0,0);Step(40);
     assert(Car_Control_GetState()==CAR_FAULT && Motor_HasFault());
-    Frame(0,0,0,0);
+    ButtonFrame(0,0,0);
     assert(Car_Control_GetState()==CAR_WAIT_CENTER);
-    Step(40);Frame(0,0,0,0);assert(Car_Control_GetState()==CAR_READY && !Motor_HasFault());
-    Reset(0U);Ready();next_tx_result=HAL_ERROR;Frame(0,0,0,1000);Step(30);
+    Step(40);ButtonFrame(0,0,0);assert(Car_Control_GetState()==CAR_READY && !Motor_HasFault());
+    Reset(0U);Ready();next_tx_result=HAL_ERROR;ButtonFrame(0,0,1);Step(30);
     assert(Car_Control_GetState()==CAR_FAULT);
     puts("PASS failsafe: 500 ms boundary/tick wrap/reconnect rearm/brake cannot bypass/UART corruption/TX stall/error");
 }
 static void TestRepeatedManualSegmentsAndStop(void)
 {
     BluetoothControlFrame c = {0};
-    unsigned i, speeds, stops;
-    Reset(0U); Ready();
+    unsigned i, before;
+    Reset(0U); Ready(); ImuSample(20,0); Loop();
     for (i = 0U; i < 4U; ++i) {
-        float yaw = (float)(i * 40U);
-        ImuSample(yaw, 0.0f);
-        c.forward = 1;
-        ControlFrame(c); Step(30U);
+        c.forward = 1; ImuSample(20,0); ControlFrame(c); Step(30U);
         assert(Car_Control_GetState() == CAR_RUNNING);
-        assert(Heading_GetStatus()->reference_valid);
-        assert(fabsf(Heading_GetStatus()->yaw_zero - yaw) < 0.1f);
-        assert(fabsf(Heading_GetStatus()->yaw_error) < 0.1f);
-        ImuSample(yaw + 15.0f, 0.0f); Loop(); Step(30U);
-        assert(Heading_GetStatus()->omega_final != 0);
-        assert(fabsf((float)Heading_GetStatus()->omega_final) >= 1.0f);
-        c.forward = 0;
-        stops = Count(0xFEU);
-        ControlFrame(c); Step(40U);
+        c.forward = 0; ControlFrame(c); Step(40U);
         assert(Car_Control_GetState() == CAR_READY);
-        assert(Count(0xFEU) == stops + 4U);
-        assert(!Heading_GetStatus()->reference_valid);
-        speeds = Count(0xF6U);
-        Step(30U);
-        assert(Count(0xF6U) == speeds);
+        assert(fabsf(RemoteHeading_GetStatus()->reference_yaw - 20) < 0.01f);
     }
-    ImuSample(160.0f, 0.0f);
-    c.forward = 1; ControlFrame(c); Step(30U);
-    speeds = Count(0xF6U); stops = Count(0xFEU);
+    ImuSample(24,0); Loop(); Step(40U);
+    assert(RemoteHeading_GetStatus()->phase == REMOTE_ALIGNING);
     c.stop = 1; ControlFrame(c); Step(40U);
-    assert(Car_Control_GetState() == CAR_BRAKE_LOCK);
-    assert(Count(0xFEU) == stops + 4U && Count(0xF6U) == speeds);
+    before = Count(0xF6); ImuSample(24,0); Loop(); Step(40U);
+    assert(Car_Control_GetState() == CAR_BRAKE_LOCK && Count(0xF6) == before);
+    assert(RemoteHeading_GetStatus()->reference_valid);
     c.stop = 0; ControlFrame(c); Step(40U);
-    assert(Car_Control_GetState() == CAR_BRAKE_LOCK && Count(0xF6U) == speeds);
-    c.forward = 0; ControlFrame(c); Step(40U);
-    assert(Car_Control_GetState() == CAR_READY && Count(0xF6U) == speeds);
-    puts("PASS repeated manual segments: fresh heading reference / 20% correction / release and STOP preemption");
+    assert(RemoteHeading_GetStatus()->phase == REMOTE_ALIGNING && Count(0xF6) > before);
+    ImuSample(20,0); Loop(); Step(40U);
+    assert(Car_Control_GetState() == CAR_READY);
+    puts("PASS remote reference: button releases and STOP preserve origin; unlocked idle resumes alignment");
+}
+
+static void TestNeutralInputs(void)
+{
+    CarRemoteInput_t input = {0};
+    unsigned before;
+    Reset(0U);
+    input.valid = 1U; input.sequence = 1U; input.received_tick = now;
+    Car_Control_SubmitRemoteInput(&input); Loop();
+    assert(Car_Control_GetState() == CAR_READY && Bluetooth_GetSequence() == 0U);
+    input.command.forward = 1; ++input.sequence; input.received_tick = now;
+    Car_Control_SubmitRemoteInput(&input); Loop(); Step(30U);
+    assert(Car_Control_GetState() == CAR_RUNNING);
+    input.command.stop = 1; ++input.sequence; input.received_tick = now;
+    before = Count(0xF6);
+    Car_Control_SubmitRemoteInput(&input); Loop(); Step(40U);
+    assert(Car_Control_GetState() == CAR_BRAKE_LOCK && Count(0xF6) == before);
+    input.command.forward = input.command.stop = 0; ++input.sequence; input.received_tick = now;
+    Car_Control_SubmitRemoteInput(&input); Loop();
+    assert(Car_Control_GetState() == CAR_READY);
+    input.command.forward = 1; ++input.sequence; input.received_tick = now;
+    Car_Control_SubmitRemoteInput(&input); Loop(); Step(30U);
+    before = Count(0xFE);
+    Car_Control_InvalidateRemoteInput();
+    assert(Car_Control_GetState() == CAR_RUNNING && Count(0xFE) == before);
+    Loop(); Step(40U);
+    assert(Car_Control_GetState() == CAR_LINK_LOST && Count(0xFE) >= before + 4U);
+    Reset(0U); input.command.forward = 0; input.sequence = 1U; input.received_tick = now;
+    Car_Control_SubmitRemoteInput(&input); Loop();
+    input.command.forward = 1; ++input.sequence; input.received_tick = now;
+    Car_Control_SubmitRemoteInput(&input); Loop(); Step(500U);
+    assert(Car_Control_GetState() == CAR_RUNNING);
+    Step(1U); assert(Car_Control_GetState() == CAR_LINK_LOST);
+    assert(Bluetooth_GetSequence() == 0U);
+    puts("PASS neutral car inputs: no Bluetooth frames/getters, startup, STOP, ISR-only invalidation and exact 500ms lease");
 }
 static void TestBootEnable(void)
 {
     unsigned before;
     Reset(0U);Step(1000U);
     assert(Car_Control_GetState()==CAR_WAIT_CENTER && sent_count==0U);
-    Frame(0,0,0,1000);Step(40U);
+    ButtonFrame(0,0,1);Step(40U);
     assert(Car_Control_GetState()==CAR_WAIT_CENTER && Count(0xF6)==0U);
-    Frame(0,0,0,0);assert(Car_Control_GetState()==CAR_READY);
-    Frame(0,0,0,1000);Step(40U);assert(Car_Control_GetState()==CAR_RUNNING);
-    Frame(0,1,0,1000);Step(40U);assert(Car_Control_GetState()==CAR_OFF);
-    before=sent_count;Frame(0,0,0,0);Step(600U);
+    ButtonFrame(0,0,0);assert(Car_Control_GetState()==CAR_READY);
+    ButtonFrame(0,0,1);Step(40U);assert(Car_Control_GetState()==CAR_RUNNING);
+    ButtonFrame(0,1,1);Step(40U);assert(Car_Control_GetState()==CAR_OFF);
+    before=sent_count;ButtonFrame(0,0,0);Step(600U);
     assert(Car_Control_GetState()==CAR_OFF && sent_count==before);
     /* Legacy ENABLE toggles cannot bypass the center guard. */
-    Frame(0,0,0,1000);Step(40U);
+    ButtonFrame(0,0,1);Step(40U);
     assert(Car_Control_GetState()==CAR_OFF && sent_count==before);
-    Frame(0,0,0,0);Step(40U);
+    ButtonFrame(0,0,0);Step(40U);
     assert(Car_Control_GetState()==CAR_OFF && sent_count==before);
-    Frame(1,0,0,0);Frame(0,0,0,0);
+    ButtonFrame(1,0,0);ButtonFrame(0,0,0);
     assert(Car_Control_GetState()==CAR_OFF && sent_count==before);
-    Frame(0,1,0,0);Step(40U);
+    ButtonFrame(0,1,0);Step(40U);
     before=sent_count;
-    Frame(0,1,0,0);Step(40U);
+    ButtonFrame(0,1,0);Step(40U);
     assert(Car_Control_GetState()==CAR_OFF && sent_count==before);
-    Frame(0,0,0,0);assert(Car_Control_GetState()==CAR_OFF);
-    Frame(0,0,0,0);assert(Car_Control_GetState()==CAR_WAIT_CENTER);
-    Frame(0,0,0,0);assert(Car_Control_GetState()==CAR_WAIT_CENTER);
+    ButtonFrame(0,0,0);assert(Car_Control_GetState()==CAR_OFF);
+    ButtonFrame(0,0,0);assert(Car_Control_GetState()==CAR_WAIT_CENTER);
+    ButtonFrame(0,0,0);assert(Car_Control_GetState()==CAR_WAIT_CENTER);
     Step(40U);assert(Car_Control_GetState()==CAR_WAIT_CENTER && sent_count==before+4U);
-    Frame(0,0,0,0);assert(Car_Control_GetState()==CAR_READY);
-    Frame(0,0,0,1000);Step(40U);assert(Car_Control_GetState()==CAR_RUNNING);
+    ButtonFrame(0,0,0);assert(Car_Control_GetState()==CAR_READY);
+    ButtonFrame(0,0,1);Step(40U);assert(Car_Control_GetState()==CAR_RUNNING);
     Reset(0U);HAL_UART_ErrorCallback(&huart5);Loop();
     assert(Car_Control_GetState()==CAR_FAULT);
     Step(40U);assert(Count(0xFE)==4U && Count(0xF6)==0U);
     puts("PASS boot enable: one-shot F3/no Bluetooth motion/no ENABLE/held DISABLE/centered packet recovery/brake resets recovery");
+}
+static void TestBootStopFrame(void)
+{
+    /* A STOP before enable can be queued must retain the boot request. The
+     * first neutral packet queues enable; the second, after TX idle, is READY. */
+    BluetoothControlFrame stop_frame = {0};
+    stop_frame.stop = 1;
+    Reset(0U); huart5.RxState = HAL_UART_STATE_READY; Motor_Init(); Car_Control_Init(); sent_count = 0U;
+    ControlFrame(stop_frame); Step(40U);
+    assert(Car_Control_GetState()==CAR_WAIT_CENTER && Count(0xF6)==0U);
+    unsigned enabled = 0U;
+    for (unsigned i=0U;i<sent_count;++i)
+        if (sent[i].bytes[1]==0xF3U && sent[i].bytes[3]==1U) ++enabled;
+    assert(enabled==0U);
+    ButtonFrame(0,0,0); Step(40U);
+    ButtonFrame(0,0,0);
+    assert(Car_Control_GetState()==CAR_READY);
+    enabled = 0U;
+    for (unsigned i=0U;i<sent_count;++i)
+        if (sent[i].bytes[1]==0xF3U && sent[i].bytes[3]==1U) ++enabled;
+    assert(enabled==4U && Count(0xF6)==0U);
+    /* After enabling, even the first STOP before READY immediately locks. */
+    Reset(0U);Step(1000U);
+    assert(Car_Control_GetState()==CAR_WAIT_CENTER);
+    ControlFrame(stop_frame);Step(40U);
+    assert(Car_Control_GetState()==CAR_BRAKE_LOCK && Count(0xF6)==0U);
+    ButtonFrame(0,0,0);Step(40U);
+    assert(Car_Control_GetState()==CAR_READY);
+    ButtonFrame(0,0,1);Step(40U);
+    assert(Car_Control_GetState()==CAR_RUNNING);
+    /* Once the car has driven, STOP latches the brake lock as before. */
+    ControlFrame(stop_frame);Step(40U);
+    assert(Car_Control_GetState()==CAR_BRAKE_LOCK);
+    ButtonFrame(0,0,0);Step(40U);
+    assert(Car_Control_GetState()==CAR_READY);
+    puts("PASS boot stop frame: powered STOP immediately locks, neutral unlocks within two frames");
 }
 static void TestPD10(void)
 {
@@ -864,19 +825,20 @@ static void TestPD10(void)
 #include "shot_cases.inc"
 #include "left_turn_cases.inc"
 #include "servo_cases.inc"
+#include "remote_heading_cases.inc"
 int main(void)
 {
     setvbuf(stdout,NULL,_IONBF,0);
     TestParser();
     if (!CAR_PD10_STANDALONE_TEST && !CAR_MECANUM_TEST_MODE && !CAR_HEADING_TEST_MODE)
-        TestActualPhoneProfile();
+        { TestActualPhoneProfile(); TestPhone20Car(); TestPhone20Joystick(); TestRemoteMotionGate(); TestRemoteHeadingPreemption(); TestMovingDriftConfirmation(); }
     if (!CAR_PD10_STANDALONE_TEST && !CAR_MECANUM_TEST_MODE && !CAR_HEADING_TEST_MODE)
         { TestIndependentButtons(); TestIndependentTurns(); TestLeftPacket(); TestLeftRemoteTurn(); TestTranslationAfterTurn(); TestTurnWrongWayLocks();
           TestTurnSettledCorrection(); TestButtonRequiresReady(); }
     TestMotor();TestMecanumMath();TestDirectionWrappers();TestTunerCommands();TestTunerFraming();TestTunerTransport();
-    if (CAR_HEADING_TEST_MODE) { TestHeadingIntegration();TestHeadingMailbox(); }
+    if (CAR_HEADING_TEST_MODE) { TestHeadingIntegration();TestRemoteReferenceLifetime(); }
     else if (CAR_MECANUM_TEST_MODE) TestMecanumSafety();
     else if (CAR_PD10_STANDALONE_TEST) TestPD10();
-    else { TestControl();TestFailsafe();TestRepeatedManualSegmentsAndStop();TestBootEnable();TestHeadingIntegration();TestJoystickCenterBrakesHeading();TestTunerSafety(); TestVisionPacket();TestVisionLocalFollow();TestVisionReversalAndFault();TestVisionJitterAndRecentering();TestVisionBluetooth();TestVisionAlignmentBounds();TestShotPacket();TestShotBluetoothSwitch();TestShotEntryAndModes();TestShotAimAndFire();TestShotJitterAndFreshFrames();TestShotSafety();TestShotAlignmentBounds();TestPhone20Chassis();TestServoPacket();TestServoRemote();TestServoRemoteMotionAndReconnect();TestServoButton();TestServoButtonSafety();TestServoButtonOffline();TestServoOneButton();TestServoChassisInterlock();TestServoBoolPacket();TestServoBoolActions();TestServoBoolSafety();TestServoGapPacket();TestServoGapAction(); }
+    else { TestControl();TestFailsafe();TestRepeatedManualSegmentsAndStop();TestNeutralInputs();TestBootEnable();TestBootStopFrame();TestRemoteReferenceLifetime();TestHeadingIntegration();TestManualReleaseBrakesHeading();TestTunerSafety(); TestVisionPacket();TestVisionLocalFollow();TestVisionReversalAndFault();TestVisionJitterAndRecentering();TestVisionBluetooth();TestVisionAlignmentBounds();TestShotPacket();TestShotBluetoothSwitch();TestShotEntryAndModes();TestShotAimAndFire();TestShotJitterAndFreshFrames();TestShotSafety();TestShotAlignmentBounds();TestServoPacket();TestReservedFieldNoEffect();TestServoBoolPacket();TestBoolShotSwitch();TestBoolShotAimAndRelease();TestAimInterface();TestServoGapPacket();TestServoCarIndependence(); }
     puts("ALL CAR TESTS PASSED (host HAL simulation, not hardware)");return 0;
 }

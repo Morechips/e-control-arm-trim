@@ -32,3 +32,5 @@ void UART5_IRQHandler(void)
 void USART6_IRQHandler(void) { HAL_UART_IRQHandler(&huart6); }
 void I2C1_EV_IRQHandler(void) { HAL_I2C_EV_IRQHandler(&hi2c1); }
 void I2C1_ER_IRQHandler(void) { HAL_I2C_ER_IRQHandler(&hi2c1); }
+
+void USART3_IRQHandler(void) { HAL_UART_IRQHandler(&huart3); }

@@ -1,13 +1,12 @@
 #include "car_control.h"
-#include "bluetooth_driver.h"
 #include "motor_driver.h"
 #include "serial_io.h"
-#include "board_app.h"
 #include "mecanum.h"
 #include "mecanum_test.h"
 #include "heading_control.h"
 #include "turn_right.h"
 #include "turn_config.h"
+#include "remote_heading.h"
 #include "maxicam.h"
 #include "vision_config.h"
 #include "laser.h"
@@ -17,9 +16,39 @@
 #include <limits.h>
 #include <math.h>
 
+static CarRemoteInput_t remote_input;
+static volatile uint8_t remote_invalidated;
+static CarLocalInput_t local_input;
+void Car_Control_SubmitRemoteInput(const CarRemoteInput_t *input)
+{
+    uint32_t mask;
+    if (input == NULL) return;
+    mask = __get_PRIMASK(); __disable_irq();
+    remote_input = *input;
+    remote_invalidated = (uint8_t)!input->valid;
+    __set_PRIMASK(mask);
+}
+void Car_Control_InvalidateRemoteInput(void) { remote_invalidated = 1U; }
+void Car_Control_SubmitLocalInput(const CarLocalInput_t *input)
+{
+    if (input == NULL) return;
+    local_input.vision_held = input->vision_held;
+    local_input.shot_held = input->shot_held;
+    local_input.vision_press |= input->vision_press;
+    local_input.shot_press |= input->shot_press;
+    local_input.pd10_low = input->pd10_low;
+    local_input.pd10_ready = input->pd10_ready;
+}
+static uint8_t RemoteValid(void) { return (uint8_t)(remote_input.valid && !remote_invalidated); }
+static uint8_t RemoteConnected(void)
+{
+    return (uint8_t)(RemoteValid() &&
+        (uint32_t)(HAL_GetTick() - remote_input.received_tick) <= BT_FAILSAFE_TIMEOUT_MS);
+}
 static CarState_t state;
 static uint8_t previous_disable, previous_stop, powered, recovery_center;
 static uint8_t boot_enable_pending, boot_wait_first_packet;
+static uint32_t boot_wait_log_tick;
 static uint8_t prev_right_90, prev_right_180;
 static uint8_t pending_right_90, pending_right_180;
 static uint8_t active_right_90, active_right_180;
@@ -28,27 +57,22 @@ static uint8_t turn_wait_logged;
 static uint8_t button_was_moving;
 static uint8_t turn_conflict_logged, move_conflict_logged;
 static uint32_t last_sequence, output_tick, release_sequence;
-static uint8_t local_low;
-static uint32_t local_change_tick;
 static int16_t log_vx, log_vy, log_rotation;
-static int8_t previous_vx_sign, previous_vy_sign;
+static uint8_t remote_drive; /* 0=stopped, 1=translation, 2=alignment */
 static uint8_t heading_updated;
 static const char *logged_route;
 static uint32_t route_log_tick;
 static uint32_t control_diag_ms;
-static uint8_t vision_active, vision_is_shot, vision_from_bt, vision_enable_queued;
-static uint8_t vision_button_raw, vision_button_stable, vision_fault_rearm;
-static uint8_t shot_button_raw, shot_button_stable;
+static uint8_t vision_active, vision_is_shot, vision_from_remote, vision_enable_queued;
+static uint8_t vision_fault_rearm;
 static uint8_t shot_request_pending;
 static int16_t previous_cam_t, previous_shot;
 static int8_t vision_direction, vision_motion;
-static uint32_t vision_button_tick, vision_sequence, vision_frame_tick;
-static uint32_t shot_button_tick, shot_fire_tick;
+static uint32_t vision_sequence, vision_frame_tick;
+static uint32_t shot_fire_tick;
 static uint32_t vision_settle_tick, vision_sample_tick;
 static int16_t vision_samples[VISION_STABLE_FRAMES];
 static uint8_t vision_has_target, vision_settle_started, vision_sample_count;
-volatile uint32_t heading_test_action, heading_test_request;
-static uint32_t test_seen;
 
 static void Transition(CarState_t next)
 {
@@ -59,9 +83,19 @@ static void Transition(CarState_t next)
     };
     char line[80];
     if (state == next) return;
+    if (next == CAR_OFF || next == CAR_LINK_LOST) RemoteHeading_Reset();
     (void)snprintf(line, sizeof(line), "[CAR] %s -> %s\r\n", names[state], names[next]);
     Debug_Log(line);
     state = next;
+}
+
+/* Bench instrument for "how long until the remote is usable". */
+static void LogReady(void)
+{
+    char line[48];
+    (void)snprintf(line, sizeof(line), "[CAR] READY t=%lu\r\n",
+                   (unsigned long)HAL_GetTick());
+    Debug_Log(line);
 }
 
 static void LogControl(const char *route)
@@ -76,12 +110,12 @@ static void LogControl(const char *route)
     Debug_Log(line);
 }
 
-static void LogInputEvent(const char *event, const BluetoothControlFrame *c)
+static void LogInputEvent(const char *event, const CarCommand_t *c)
 {
     char line[80];
-    uint32_t age = HAL_GetTick() - Bluetooth_GetLastRxTick();
+    uint32_t age = HAL_GetTick() - remote_input.received_tick;
     (void)snprintf(line, sizeof(line), "[CTRL] %s seq=%lu age=%lu state=%u\r\n",
-                   event, (unsigned long)Bluetooth_GetSequence(),
+                   event, (unsigned long)remote_input.sequence,
                    (unsigned long)age, (unsigned)state);
     Debug_Log(line);
     (void)snprintf(line, sizeof(line),
@@ -100,7 +134,7 @@ static long ScaledHundred(float value)
     return (long)(value * 100.0f);
 }
 
-static void LogControlDiagnostics(const BluetoothControlFrame *c)
+static void LogControlDiagnostics(const CarCommand_t *c)
 {
     char line[80];
     const HeadingPIDParameters *pid = Heading_GetPID();
@@ -110,8 +144,8 @@ static void LogControlDiagnostics(const BluetoothControlFrame *c)
     control_diag_ms = now;
     (void)snprintf(line, sizeof(line),
                    "[CTRL] st=%u seq=%lu age=%lu FBLR=%u%u%u%u S=%u X=%d Y=%d\r\n",
-                   (unsigned)state, (unsigned long)Bluetooth_GetSequence(),
-                   (unsigned long)(now - Bluetooth_GetLastRxTick()),
+                   (unsigned)state, (unsigned long)remote_input.sequence,
+                   (unsigned long)(now - remote_input.received_tick),
                    (unsigned)c->forward, (unsigned)c->backward,
                    (unsigned)c->strafe_left, (unsigned)c->strafe_right,
                    (unsigned)c->stop, c->joy_x, c->joy_y);
@@ -124,24 +158,7 @@ static void LogControlDiagnostics(const BluetoothControlFrame *c)
     Debug_Log(line);
 }
 
-static int16_t JoystickRPM(int16_t value, int16_t maximum_rpm)
-{
-    if (value >= -JOY_DEADZONE && value <= JOY_DEADZONE) return 0;
-    return (int16_t)((int32_t)value * maximum_rpm / JOY_RANGE);
-}
-
-static int8_t Sign(int16_t value)
-{
-    return value > 0 ? 1 : (value < 0 ? -1 : 0);
-}
-
-static uint8_t Centered(const BluetoothControlFrame *c)
-{
-    return (uint8_t)(c->joy_x >= -JOY_DEADZONE && c->joy_x <= JOY_DEADZONE &&
-                     c->joy_y >= -JOY_DEADZONE && c->joy_y <= JOY_DEADZONE);
-}
-
-static uint8_t ButtonsReleased(const BluetoothControlFrame *c)
+static uint8_t ButtonsReleased(const CarCommand_t *c)
 {
     return (uint8_t)(!c->forward && !c->backward && !c->strafe_left &&
                      !c->strafe_right && !c->right_90 && !c->right_180 &&
@@ -149,38 +166,29 @@ static uint8_t ButtonsReleased(const BluetoothControlFrame *c)
                      !c->stop && !c->brake && !c->disable);
 }
 
-static void ResetHeading(void)
+/* Bench inputs are compiled out of the production image, where the only
+ * physical input is the start key. */
+static uint8_t PhysicalInputsIdle(void)
 {
-    (void)Heading_Update(false);
-    Heading_ClearReference();
-    heading_updated = 1U;
-    previous_vx_sign = previous_vy_sign = 0;
-    log_rotation = 0;
+#if CAR_TEST_INPUTS_ENABLE
+    return (uint8_t)(!local_input.vision_held && !local_input.shot_held);
+#else
+    return 1U;
+#endif
 }
 
-static int16_t ManualHeadingCorrection(int16_t vx, int16_t vy)
+static void ResetHeading(void)
 {
-    int8_t vx_sign = Sign(vx), vy_sign = Sign(vy);
-    int16_t correction;
-    int32_t x_magnitude = vx < 0 ? -(int32_t)vx : (int32_t)vx;
-    int32_t y_magnitude = vy < 0 ? -(int32_t)vy : (int32_t)vy;
-    int32_t maximum = x_magnitude > y_magnitude ? x_magnitude : y_magnitude;
-    int32_t limit = maximum * MANUAL_HEADING_LIMIT_PERCENT / 100;
-    if (maximum != 0 && limit == 0) limit = 1;
-    if (vx_sign != previous_vx_sign || vy_sign != previous_vy_sign)
-        (void)Heading_Update(false);
-    previous_vx_sign = vx_sign;
-    previous_vy_sign = vy_sign;
+    remote_drive = 0U;
+    RemoteHeading_Suspend();
     heading_updated = 1U;
-    correction = CAR_YAW_HOLD_ENABLE ? Heading_Update(true) : Heading_Update(false);
-    if (correction > limit) correction = (int16_t)limit;
-    if (correction < -limit) correction = (int16_t)-limit;
-    return correction;
+    log_rotation = 0;
 }
 
 static void ClearTurn(void)
 {
     TurnRight_Cancel();
+    if (RemoteHeading_GetStatus()->phase == REMOTE_TURNING) RemoteHeading_Suspend();
     pending_right_90 = pending_right_180 = 0U;
     active_right_90 = active_right_180 = 0U;
     pending_left_90 = active_left_90 = 0U;
@@ -189,6 +197,7 @@ static void ClearTurn(void)
 
 static void NormalStop(void)
 {
+    remote_drive = 0U;
     if (state == CAR_RUNNING || state == CAR_TURNING) (void)brake();
     ResetHeading();
     button_was_moving = 0U;
@@ -200,8 +209,9 @@ static void NormalStop(void)
 static void VisionExit(CarState_t next)
 {
     if (!vision_active) return;
+    RemoteHeading_Reset();
     Laser_Disable();
-    vision_active = vision_is_shot = vision_from_bt = vision_enable_queued = 0U;
+    vision_active = vision_is_shot = vision_from_remote = vision_enable_queued = 0U;
     vision_settle_started = vision_sample_count = 0U;
     vision_has_target = 0U;
     vision_direction = vision_motion = 0;
@@ -218,37 +228,30 @@ static void VisionExit(CarState_t next)
 }
 
 static HAL_StatusTypeDef VisionEnter(uint8_t from_bt, uint8_t is_shot,
-                                     const BluetoothControlFrame *c)
+                                     const CarCommand_t *c)
 {
     uint32_t sequence;
-    HAL_StatusTypeDef status;
     if (vision_active && vision_is_shot == is_shot) return HAL_OK;
     if (Motor_HasFault() || state == CAR_FAULT ||
         state == CAR_BRAKE_LOCK || vision_fault_rearm ||
-        (Bluetooth_IsConnected() && (c->stop || c->brake || c->disable))) return HAL_ERROR;
-    if (from_bt && !Bluetooth_IsConnected()) return HAL_ERROR;
+        (RemoteConnected() && (c->stop || c->brake || c->disable))) return HAL_ERROR;
+    if (from_bt && !RemoteConnected()) return HAL_ERROR;
+    RemoteHeading_Reset();
     if (vision_active)
-        VisionExit(Bluetooth_IsConnected() ? CAR_WAIT_CENTER : CAR_OFF);
+        VisionExit(RemoteConnected() ? CAR_WAIT_CENTER : CAR_OFF);
     ClearTurn();
     (void)Motor_EStopAll();
     Laser_Disable();
     ResetHeading();
     boot_enable_pending = boot_wait_first_packet = 0U;
     button_was_moving = 0U;
-    status = MaxiCam_SendMode(is_shot ? MODE_CMD_AIM : MODE_CMD_OBJECT);
-    if (status != HAL_OK) {
-        if (Bluetooth_IsConnected()) Transition(CAR_WAIT_CENTER);
-        else {
-            (void)Motor_DisableAll();
-            powered = 0U;
-            Transition(CAR_OFF);
-        }
-        Debug_Log("[VISION] camera mode TX failed\r\n");
-        return status;
-    }
+    /* The camera only accepts the mode byte after a QR notification, so the
+     * request is recorded here and sent by MaxiCam_Process(). Entering vision
+     * mode no longer depends on that transmission succeeding. */
+    MaxiCam_RequestMode(is_shot ? MAXICAM_MODE_AIM : MAXICAM_MODE_OBJECT);
     vision_active = 1U;
     vision_is_shot = is_shot;
-    vision_from_bt = from_bt;
+    vision_from_remote = from_bt;
     vision_enable_queued = vision_has_target = 0U;
     vision_settle_started = vision_sample_count = 0U;
     vision_direction = vision_motion = 0;
@@ -260,39 +263,23 @@ static HAL_StatusTypeDef VisionEnter(uint8_t from_bt, uint8_t is_shot,
     return HAL_OK;
 }
 
-static void VisionButtonProcess(const BluetoothControlFrame *c)
+#if CAR_TEST_INPUTS_ENABLE
+static void LocalVisionRequests(const CarCommand_t *c)
 {
-    uint8_t low = Board_VisionButtonIsLow();
-    uint32_t now = HAL_GetTick();
-    if (low != vision_button_raw) {
-        vision_button_raw = low;
-        vision_button_tick = now;
+    uint8_t vision_press = local_input.vision_press, shot_press = local_input.shot_press;
+    local_input.vision_press = local_input.shot_press = 0U;
+    if (vision_press) {
+        if (vision_active && !vision_is_shot)
+            VisionExit(RemoteConnected() ? CAR_WAIT_CENTER : CAR_OFF);
+        else (void)VisionEnter(0U, 0U, c);
     }
-    if (low == vision_button_stable ||
-        (uint32_t)(now - vision_button_tick) < VISION_BUTTON_DEBOUNCE_MS) return;
-    vision_button_stable = low;
-    if (!low) return;
-    if (vision_active && !vision_is_shot)
-        VisionExit(Bluetooth_IsConnected() ? CAR_WAIT_CENTER : CAR_OFF);
-    else (void)VisionEnter(0U, 0U, c);
-}
-
-static void ShotButtonProcess(const BluetoothControlFrame *c)
-{
-    uint8_t low = Board_ShotButtonIsLow();
-    uint32_t now = HAL_GetTick();
-    if (low != shot_button_raw) {
-        shot_button_raw = low;
-        shot_button_tick = now;
+    if (shot_press) {
+        if (vision_active && vision_is_shot)
+            VisionExit(RemoteConnected() ? CAR_WAIT_CENTER : CAR_OFF);
+        else (void)VisionEnter(0U, 1U, c);
     }
-    if (low == shot_button_stable ||
-        (uint32_t)(now - shot_button_tick) < SHOT_BUTTON_DEBOUNCE_MS) return;
-    shot_button_stable = low;
-    if (!low) return;
-    if (vision_active && vision_is_shot)
-        VisionExit(Bluetooth_IsConnected() ? CAR_WAIT_CENTER : CAR_OFF);
-    else (void)VisionEnter(0U, 1U, c);
 }
+#endif
 
 static int8_t VisionFrameDirection(int16_t offset)
 {
@@ -338,7 +325,7 @@ static int8_t VisionSampleDecision(int16_t offset, uint32_t now)
     return 0;
 }
 
-static void VisionProcess(const BluetoothControlFrame *c)
+static void VisionProcess(const CarCommand_t *c)
 {
     MaxiCamTargetData_t target;
     uint32_t sequence, now = HAL_GetTick();
@@ -350,11 +337,11 @@ static void VisionProcess(const BluetoothControlFrame *c)
         vision_fault_rearm = 1U;
         return;
     }
-    if (Bluetooth_IsConnected() && (c->stop || c->brake || c->disable)) {
+    if (RemoteConnected() && (c->stop || c->brake || c->disable)) {
         VisionExit(c->disable ? CAR_OFF : CAR_BRAKE_LOCK);
         return;
     }
-    if (vision_from_bt && !Bluetooth_IsConnected()) {
+    if (vision_from_remote && !RemoteConnected()) {
         VisionExit(CAR_LINK_LOST);
         return;
     }
@@ -367,7 +354,7 @@ static void VisionProcess(const BluetoothControlFrame *c)
             (!vision_is_shot || target.type == (uint8_t)DETECT_TARGET));
         vision_direction = vision_has_target ? VisionFrameDirection(target.offset_x) : 0;
         if (state == CAR_SHOT_FIRING && (!vision_has_target || vision_direction != 0)) {
-            VisionExit(Bluetooth_IsConnected() ? CAR_WAIT_CENTER : CAR_OFF);
+            VisionExit(RemoteConnected() ? CAR_WAIT_CENTER : CAR_OFF);
             return;
         }
         if (!vision_has_target) VisionStopMotion();
@@ -377,7 +364,7 @@ static void VisionProcess(const BluetoothControlFrame *c)
     if (vision_has_target &&
         (uint32_t)(now - vision_frame_tick) >= VISION_FRAME_TIMEOUT_MS) {
         if (vision_is_shot && state == CAR_SHOT_FIRING) {
-            VisionExit(Bluetooth_IsConnected() ? CAR_WAIT_CENTER : CAR_OFF);
+            VisionExit(RemoteConnected() ? CAR_WAIT_CENTER : CAR_OFF);
             return;
         }
         vision_has_target = 0U;
@@ -401,7 +388,7 @@ static void VisionProcess(const BluetoothControlFrame *c)
     }
     if (state == CAR_SHOT_FIRING) {
         if ((uint32_t)(now - shot_fire_tick) >= LASER_HOLD_MS)
-            VisionExit(Bluetooth_IsConnected() ? CAR_WAIT_CENTER : CAR_OFF);
+            VisionExit(RemoteConnected() ? CAR_WAIT_CENTER : CAR_OFF);
         return;
     }
     if (vision_motion != 0 || !vision_has_target) return;
@@ -440,6 +427,9 @@ static void VisionProcess(const BluetoothControlFrame *c)
 
 void Car_Control_Init(void)
 {
+    memset(&remote_input, 0, sizeof(remote_input));
+    memset(&local_input, 0, sizeof(local_input));
+    remote_invalidated = 0U;
     state = CAR_OFF;
     previous_disable = previous_stop = powered = recovery_center = 0U;
     prev_right_90 = prev_right_180 = 0U;
@@ -448,35 +438,30 @@ void Car_Control_Init(void)
     prev_left_90 = pending_left_90 = active_left_90 = 0U;
     turn_wait_logged = 0U;
     button_was_moving = 0U;
-    last_sequence = Bluetooth_GetSequence();
+    last_sequence = remote_input.sequence;
     output_tick = HAL_GetTick();
     release_sequence = last_sequence;
-    local_low = 0U;
-    local_change_tick = output_tick;
     Mecanum_Test_Init();
     Heading_Init();
+    RemoteHeading_Reset();
     log_vx = log_vy = log_rotation = 0;
-    previous_vx_sign = previous_vy_sign = 0;
+    remote_drive = 0U;
     heading_updated = 0U;
     logged_route = NULL;
     route_log_tick = HAL_GetTick() - 1000U;
     control_diag_ms = HAL_GetTick();
-    vision_active = vision_is_shot = vision_from_bt = vision_enable_queued = 0U;
+    vision_active = vision_is_shot = vision_from_remote = vision_enable_queued = 0U;
     vision_fault_rearm = vision_has_target = 0U;
-    vision_button_raw = vision_button_stable = Board_VisionButtonIsLow();
-    vision_button_tick = HAL_GetTick();
-    shot_button_raw = shot_button_stable = Board_ShotButtonIsLow();
-    shot_button_tick = HAL_GetTick();
     shot_request_pending = 0U;
     previous_cam_t = previous_shot = 0;
     vision_direction = vision_motion = 0;
     vision_sequence = vision_frame_tick = 0U;
     vision_settle_started = vision_sample_count = 0U;
     vision_settle_tick = vision_sample_tick = shot_fire_tick = 0U;
-    heading_test_action = heading_test_request = test_seen = 0U;
     Debug_Log("[CAR] OFF\r\n");
     boot_enable_pending = (uint8_t)(CAR_BOOT_AUTO_ENABLE && !CAR_PD10_STANDALONE_TEST);
     boot_wait_first_packet = boot_enable_pending;
+    boot_wait_log_tick = HAL_GetTick();
     if (boot_enable_pending) Transition(CAR_WAIT_CENTER);
 }
 
@@ -484,10 +469,9 @@ CarState_t Car_Control_GetState(void) { return state; }
 
 static uint8_t AngleCommandAllowed(void)
 {
-    const BtControl_t *control = Bluetooth_GetControl();
-    const BluetoothControlFrame *c = &control->frame;
-    return (uint8_t)((state == CAR_READY || state == CAR_RUNNING) &&
-        Bluetooth_IsConnected() && !c->stop && !c->brake && !c->disable &&
+    const CarCommand_t *c = &remote_input.command;
+    return (uint8_t)(CAR_HEADING_TEST_MODE && (state == CAR_READY || state == CAR_RUNNING) &&
+        RemoteConnected() && !c->stop && !c->brake && !c->disable &&
         !Motor_HasFault() && !CAR_PD10_STANDALONE_TEST && !CAR_MECANUM_TEST_MODE);
 }
 
@@ -501,11 +485,12 @@ HAL_StatusTypeDef Car_Control_AdjustTargetYaw(float delta_degrees)
     return AngleCommandAllowed() && Heading_AdjustTarget(delta_degrees) ? HAL_OK : HAL_ERROR;
 }
 
+#if CAR_PD10_STANDALONE_TEST
+/* Bench-only standalone path; requires the bench inputs (see car_config.h). */
 static void Local_Process(void)
 {
     uint32_t now = HAL_GetTick();
-    uint8_t low = Board_PD10IsLow();
-    if (low != local_low) { local_low = low; local_change_tick = now; }
+    uint8_t low = local_input.pd10_low;
     if (Motor_HasFault() && state != CAR_FAULT) {
         (void)Motor_EStopAll();
         (void)Motor_DisableAll();
@@ -524,7 +509,7 @@ static void Local_Process(void)
         }
         return;
     }
-    if ((uint32_t)(now - local_change_tick) < CAR_PD10_DEBOUNCE_MS) return;
+    if (!local_input.pd10_ready) return;
     if (state == CAR_OFF) {
         if (Motor_EnableAll() == HAL_OK) Transition(CAR_LOCAL_STARTING);
         return;
@@ -537,27 +522,46 @@ static void Local_Process(void)
         }
     }
 }
+#endif
 
-static uint8_t BluetoothSafety(const BluetoothControlFrame *c, uint8_t fresh)
+static uint8_t RemoteSafety(const CarCommand_t *c, uint8_t fresh)
 {
-    const BtControl_t *control = Bluetooth_GetControl();
     uint32_t now = HAL_GetTick();
     uint8_t disable_edge = (uint8_t)(fresh && c->disable && !previous_disable);
     if (fresh) previous_disable = (uint8_t)c->disable;
+    if (RemoteValid()) boot_wait_first_packet = 0U;
+    if (state == CAR_WAIT_CENTER) {
+        if ((uint32_t)(now - boot_wait_log_tick) >= 1000U) {
+            boot_wait_log_tick = now;
+            Debug_Log(!RemoteValid() ? "[CAR] boot wait: valid control frame\r\n" :
+                      !ButtonsReleased(c) ? "[CAR] boot wait: release controls\r\n" :
+                      "[CAR] boot wait: motor TX idle / fresh frame\r\n");
+        }
+    }
     if (boot_wait_first_packet && Motor_HasFault()) {
         boot_enable_pending = boot_wait_first_packet = 0U;
         (void)Motor_EStopAll();
         Transition(CAR_FAULT);
         return 1U;
     }
-    if (boot_enable_pending && !(control->valid && (c->stop || c->brake || c->disable)) &&
-        Motor_EnableAll() == HAL_OK) {
-        boot_enable_pending = 0U;
-        powered = 1U;
-        Debug_Log("[CAR] POWER-ON ENABLE\r\n");
+    /* The phone's first frame after a reconnect often still carries `stop`.
+     * Before the car has ever been enabled that must not cancel the boot
+     * enable. The exemption ends immediately when enabling succeeds. */
+    if (boot_enable_pending) {
+        if (!c->disable && (c->stop || c->brake) && RemoteConnected() && !Motor_HasFault()) {
+            /* Only pending boot enable is exempt: wait for neutral input. */
+            return 1U;
+        }
+        /* Energize at power-up as before, but DISABLE is the highest-priority
+         * safety input: never energize into it. */
+        if (!c->disable && !c->stop && !c->brake && Motor_EnableAll() == HAL_OK) {
+            boot_enable_pending = 0U;
+            powered = 1U;
+            Debug_Log("[CAR] POWER-ON ENABLE\r\n");
+        }
     }
-    if (!Bluetooth_IsConnected()) {
-        if (boot_wait_first_packet && !control->valid) return 1U;
+    if (!RemoteConnected()) {
+        if (boot_wait_first_packet && !RemoteValid()) return 1U;
         boot_enable_pending = boot_wait_first_packet = 0U;
         if (state != CAR_OFF && state != CAR_LINK_LOST && state != CAR_FAULT) {
             LogInputEvent("LINK_LOST", c);
@@ -571,7 +575,7 @@ static uint8_t BluetoothSafety(const BluetoothControlFrame *c, uint8_t fresh)
         return 1U;
     }
     boot_wait_first_packet = 0U;
-    if (disable_edge) {
+    if (disable_edge || (c->disable && boot_enable_pending)) {
         boot_enable_pending = 0U;
         ClearTurn();
         (void)Motor_EStopAll();
@@ -593,7 +597,7 @@ static uint8_t BluetoothSafety(const BluetoothControlFrame *c, uint8_t fresh)
         return 1U;
     }
     if (state == CAR_OFF || state == CAR_LINK_LOST || state == CAR_FAULT) {
-        if (fresh && ButtonsReleased(c) && Centered(c)) {
+        if (fresh && ButtonsReleased(c)) {
             if (recovery_center && Motor_IsIdle()) {
                 Motor_ClearFault();
                 if (Motor_EnableAll() == HAL_OK) {
@@ -606,8 +610,8 @@ static uint8_t BluetoothSafety(const BluetoothControlFrame *c, uint8_t fresh)
         return 1U;
     }
     if (c->stop || c->brake) {
-        boot_enable_pending = 0U;
         recovery_center = 0U;
+        boot_enable_pending = 0U;
         if (state != CAR_BRAKE_LOCK) {
             ClearTurn();
             (void)Motor_EStopAll();
@@ -619,24 +623,47 @@ static uint8_t BluetoothSafety(const BluetoothControlFrame *c, uint8_t fresh)
         return 1U;
     }
     if (state == CAR_BRAKE_LOCK) {
-        if (fresh && ButtonsReleased(c) && Centered(c) && Motor_IsIdle()) {
+        if (fresh && ButtonsReleased(c) && Motor_IsIdle()) {
             Transition(powered ? CAR_READY : CAR_OFF);
+            LogReady();
             output_tick = now;
             Debug_Log("[CAR] BRAKE LOCK RELEASED\r\n");
         }
         return 1U;
     }
     if (state == CAR_WAIT_CENTER) {
-        if (fresh && ButtonsReleased(c) && Centered(c) && Motor_IsIdle()) {
+        if (fresh && ButtonsReleased(c) && Motor_IsIdle()) {
             Transition(CAR_READY);
             output_tick = now;
+            LogReady();
         }
         return 1U;
     }
     return 0U;
 }
 
-static uint8_t ProcessTurn(const BluetoothControlFrame *c, uint8_t edge_90,
+/* Called before translation or a new remote turn, including at rest. */
+static uint8_t RemoteHeadingGate(void)
+{
+    const RemoteHeadingStatus_t *heading = RemoteHeading_GetStatus();
+    if (heading->phase == REMOTE_ALIGNING) {
+        if (remote_drive == 1U) { NormalStop(); return 1U; }
+        if ((uint32_t)(HAL_GetTick() - output_tick) >= CAR_CONTROL_PERIOD_MS &&
+            mecanum_drive(0, 0, heading->correction_rpm) == HAL_OK) {
+            remote_drive = 2U;
+            output_tick = HAL_GetTick();
+            log_rotation = heading->correction_rpm;
+            Transition(CAR_RUNNING);
+        }
+        return 1U;
+    }
+    if (remote_drive == 2U) { NormalStop(); return 1U; }
+    return (uint8_t)(heading->phase != REMOTE_ALIGNED &&
+                     heading->phase != REMOTE_DRIFTING &&
+                     heading->phase != REMOTE_NO_IMU);
+}
+
+static uint8_t ProcessTurn(const CarCommand_t *c, uint8_t edge_90,
                            uint8_t edge_180, uint8_t edge_left)
 {
     HAL_StatusTypeDef result;
@@ -666,6 +693,7 @@ static uint8_t ProcessTurn(const BluetoothControlFrame *c, uint8_t edge_90,
         TurnRight_Process(true);
         turn = TurnRight_GetStatus();
         if (turn->state == TURN_RIGHT_DONE) {
+            RemoteHeading_CompleteTurn(active_left_90 ? -1 : active_right_180 ? 2 : 1);
             ClearTurn();
             NormalStop();
             LogControl("BRAKE");
@@ -681,8 +709,20 @@ static uint8_t ProcessTurn(const BluetoothControlFrame *c, uint8_t edge_90,
     if (edge_90) pending_right_90 = 1U;
     if (edge_180) pending_right_180 = 1U;
     if (edge_left) pending_left_90 = 1U;
-    if (!pending_right_90 && !pending_right_180 && !pending_left_90)
-        return (uint8_t)(c->right_90 || c->right_180 || c->left_90);
+    if (!pending_right_90 && !pending_right_180 && !pending_left_90) {
+        if (c->right_90 || c->right_180 || c->left_90) {
+            (void)RemoteHeadingGate();
+            return 1U;
+        }
+        return 0U;
+    }
+    if (RemoteHeading_GetStatus()->phase == REMOTE_NO_IMU) {
+        if (remote_drive != 0U) NormalStop();
+        pending_right_90 = pending_right_180 = pending_left_90 = 0U;
+        Debug_Log("[TURN] remote rejected: no IMU\r\n");
+        return 1U;
+    }
+    if (RemoteHeadingGate()) return 1U;
     if (state == CAR_RUNNING) NormalStop();
     if (!Motor_IsIdle()) {
         if (!turn_wait_logged) Debug_Log("[TURN] WAIT motor_busy\r\n");
@@ -690,9 +730,8 @@ static uint8_t ProcessTurn(const BluetoothControlFrame *c, uint8_t edge_90,
         return 1U;
     }
     turn_wait_logged = 0U;
-    result = pending_right_90 ? right90(TURN_RIGHT_90_RPM) :
-             pending_right_180 ? right180(TURN_RIGHT_180_RPM) :
-                                 left90(TURN_LEFT_90_RPM);
+    result = TurnRight_StartRemote(pending_right_90 ? 90 : pending_right_180 ? 180 : -90,
+                                  pending_right_180 ? TURN_RIGHT_180_RPM : TURN_RIGHT_90_RPM);
     if (result == HAL_BUSY) return 1U;
     if (result != HAL_OK) {
         pending_right_90 = pending_right_180 = pending_left_90 = 0U;
@@ -704,14 +743,15 @@ static uint8_t ProcessTurn(const BluetoothControlFrame *c, uint8_t edge_90,
     active_right_180 = pending_right_180;
     active_left_90 = pending_left_90;
     pending_right_90 = pending_right_180 = pending_left_90 = 0U;
-    ResetHeading();
+    remote_drive = 0U;
+    RemoteHeading_BeginTurn();
     Transition(CAR_TURNING);
     LogControl(active_left_90 ? "LEFT90" :
                active_right_90 ? "RIGHT90" : "RIGHT180");
     return 1U;
 }
 
-static uint8_t ProcessButtons(const BluetoothControlFrame *c, uint8_t fresh)
+static uint8_t ProcessButtons(const CarCommand_t *c, uint8_t fresh)
 {
     uint8_t count = (uint8_t)(c->forward + c->backward + c->strafe_left + c->strafe_right);
     int16_t vx = 0, vy = 0, yaw_correction;
@@ -723,15 +763,16 @@ static uint8_t ProcessButtons(const BluetoothControlFrame *c, uint8_t fresh)
         return 1U;
     }
     move_conflict_logged = 0U;
+    if (!CAR_MECANUM_TEST_MODE && RemoteHeadingGate()) return 1U;
     if (count == 0U) {
         if (button_was_moving) {
             LogInputEvent("BUTTON_RELEASE", c);
             NormalStop();
             LogControl("BRAKE");
-            release_sequence = Bluetooth_GetSequence();
+            release_sequence = remote_input.sequence;
             return 1U;
         }
-        if (Bluetooth_GetSequence() == release_sequence) return 1U;
+        if (remote_input.sequence == release_sequence) return 1U;
         return 0U;
     }
     if (CAR_MECANUM_TEST_MODE) return 1U;
@@ -740,83 +781,35 @@ static uint8_t ProcessButtons(const BluetoothControlFrame *c, uint8_t fresh)
     else if (c->backward) { vx = -BLUETOOTH_TEST_MOVE_RPM; LogControl("BACKWARD"); }
     else if (c->strafe_left) { vy = -BLUETOOTH_TEST_MOVE_RPM; LogControl("STRAFE_LEFT"); }
     else { vy = BLUETOOTH_TEST_MOVE_RPM; LogControl("STRAFE_RIGHT"); }
-    yaw_correction = ManualHeadingCorrection(vx, vy);
     log_vx = vx;
     log_vy = vy;
+    yaw_correction = RemoteHeading_GetStatus()->phase == REMOTE_DRIFTING ?
+        RemoteHeading_GetStatus()->correction_rpm : 0;
     if ((uint32_t)(HAL_GetTick() - output_tick) >= CAR_CONTROL_PERIOD_MS &&
         mecanum_drive(vx, vy, yaw_correction) == HAL_OK) {
         output_tick = HAL_GetTick();
         log_rotation = yaw_correction;
+        remote_drive = 1U;
         Transition(CAR_RUNNING);
     }
     (void)fresh;
     return 1U;
 }
 
-static void ProcessJoystick(const BluetoothControlFrame *c)
-{
-    int16_t translation_limit = CAR_HEADING_TEST_MODE ? HEADING_TEST_TRANSLATION_RPM : MOTOR_MAX_RPM;
-    int16_t vx = JoystickRPM(c->joy_y, translation_limit);
-    int16_t vy = JoystickRPM(c->joy_x, translation_limit);
-    int16_t yaw_correction;
-    if (CAR_HEADING_TEST_MODE) {
-        int32_t sum = (vx < 0 ? -(int32_t)vx : vx) + (vy < 0 ? -(int32_t)vy : vy);
-        if (sum > HEADING_TEST_TRANSLATION_RPM) {
-            vx = (int16_t)((int32_t)vx * HEADING_TEST_TRANSLATION_RPM / sum);
-            vy = (int16_t)((int32_t)vy * HEADING_TEST_TRANSLATION_RPM / sum);
-        }
-        if (test_seen != heading_test_request) {
-            test_seen = heading_test_request;
-            if (heading_test_action == 0U || heading_test_action > 3U) {
-                (void)Motor_EStopAll();
-                ResetHeading();
-                Transition(CAR_BRAKE_LOCK);
-                return;
-            }
-            if (heading_test_action == 3U) {
-                if (!Heading_RequestReference()) Debug_Log("[TEST] reference rejected\r\n");
-            } else {
-                float step = heading_test_action == 1U ? ANGLE_ADJUST_STEP_DEG : -ANGLE_ADJUST_STEP_DEG;
-                if (Car_Control_AdjustTargetYaw(step) != HAL_OK)
-                    Debug_Log("[TEST] angle rejected\r\n");
-            }
-        }
-    }
-    if (vx == 0 && vy == 0) {
-        if (state == CAR_RUNNING) {
-            LogInputEvent("JOYSTICK_CENTER", c);
-            NormalStop(); LogControl("BRAKE");
-        }
-        else { ResetHeading(); LogControl("BRAKE"); }
-        return;
-    }
-    LogControl("JOYSTICK");
-    yaw_correction = ManualHeadingCorrection(vx, vy);
-    log_vx = vx;
-    log_vy = vy;
-    if ((uint32_t)(HAL_GetTick() - output_tick) >= CAR_CONTROL_PERIOD_MS &&
-        mecanum_drive(vx, vy, yaw_correction) == HAL_OK) {
-        output_tick = HAL_GetTick();
-        log_rotation = yaw_correction;
-        Transition(CAR_RUNNING);
-    }
-}
-
 void Car_Control_Process(void)
 {
-    const BtControl_t *control;
-    const BluetoothControlFrame *c;
+    const CarCommand_t *c;
     uint32_t sequence;
     uint8_t fresh, edge_90, edge_180, edge_left, allow, was_vision_active;
     heading_updated = 0U;
     log_vx = log_vy = 0;
-    if (CAR_PD10_STANDALONE_TEST) {
-        Local_Process();
-        goto finish;
-    }
-    control = Bluetooth_GetControl();
-    c = &control->frame;
-    sequence = Bluetooth_GetSequence();
+#if CAR_PD10_STANDALONE_TEST
+    /* Bench image: the standalone PD10 path owns the whole control loop. */
+    Local_Process();
+    goto finish;
+#endif
+    c = &remote_input.command;
+    sequence = remote_input.sequence;
     fresh = (uint8_t)(sequence != last_sequence);
     if (fresh && c->stop && !previous_stop) LogInputEvent("STOP", c);
     if (fresh) previous_stop = (uint8_t)c->stop;
@@ -830,35 +823,35 @@ void Car_Control_Process(void)
         prev_left_90 = (uint8_t)c->left_90;
     }
     was_vision_active = vision_active;
-    VisionButtonProcess(c);
-    ShotButtonProcess(c);
-    if (vision_fault_rearm && !vision_button_stable &&
-        !shot_button_stable && Motor_IsIdle()) {
+#if CAR_TEST_INPUTS_ENABLE
+    LocalVisionRequests(c);
+#endif
+    if (vision_fault_rearm && PhysicalInputsIdle() && Motor_IsIdle()) {
         Motor_ClearFault();
         vision_fault_rearm = 0U;
         Transition(CAR_OFF);
     }
     if (fresh) {
-        uint8_t cam_changed = (uint8_t)(c->Cam_T != previous_cam_t);
-        uint8_t shot_changed = (uint8_t)(c->Shot != previous_shot);
+        uint8_t cam_changed = (uint8_t)(c->vision_follow != previous_cam_t);
+        uint8_t shot_changed = (uint8_t)(c->shot != previous_shot);
         uint8_t shot_exited = 0U;
-        previous_cam_t = c->Cam_T;
-        previous_shot = c->Shot;
-        if (shot_changed) shot_request_pending = (uint8_t)(c->Shot != 0);
-        if (vision_active && vision_from_bt && vision_is_shot && !c->Shot) {
-            VisionExit(Bluetooth_IsConnected() ? CAR_WAIT_CENTER : CAR_OFF);
+        previous_cam_t = c->vision_follow;
+        previous_shot = c->shot;
+        if (shot_changed) shot_request_pending = (uint8_t)(c->shot != 0);
+        if (vision_active && vision_from_remote && vision_is_shot && !c->shot) {
+            VisionExit(RemoteConnected() ? CAR_WAIT_CENTER : CAR_OFF);
             shot_exited = 1U;
-        } else if (vision_active && vision_from_bt && !vision_is_shot &&
-                   cam_changed && !c->Cam_T) {
-            VisionExit(Bluetooth_IsConnected() ? CAR_WAIT_CENTER : CAR_OFF);
+        } else if (vision_active && vision_from_remote && !vision_is_shot &&
+                   cam_changed && !c->vision_follow) {
+            VisionExit(RemoteConnected() ? CAR_WAIT_CENTER : CAR_OFF);
         }
-        if (!shot_exited && !c->Shot && cam_changed && c->Cam_T)
+        if (!shot_exited && !c->shot && cam_changed && c->vision_follow)
             (void)VisionEnter(1U, 0U, c);
     }
-    if (shot_request_pending && !Bluetooth_IsConnected())
+    if (shot_request_pending && !RemoteConnected())
         shot_request_pending = 0U;
     if (shot_request_pending && fresh) {
-        if (!Bluetooth_IsConnected() || c->stop || c->brake || c->disable ||
+        if (!RemoteConnected() || c->stop || c->brake || c->disable ||
             Motor_HasFault() || state == CAR_FAULT || state == CAR_BRAKE_LOCK ||
             vision_fault_rearm)
             shot_request_pending = 0U;
@@ -870,11 +863,17 @@ void Car_Control_Process(void)
         goto finish;
     }
     if (was_vision_active) goto finish;
-    if (BluetoothSafety(c, fresh)) {
+    if (RemoteSafety(c, fresh)) {
         if (CAR_MECANUM_TEST_MODE) Mecanum_Test_Process(0U);
         goto finish;
     }
     if (state != CAR_READY && state != CAR_RUNNING && state != CAR_TURNING) goto finish;
+    if (!CAR_MECANUM_TEST_MODE) {
+        RemoteHeading_Update(remote_drive == 1U &&
+            !pending_right_90 && !pending_right_180 && !pending_left_90 &&
+            !c->right_90 && !c->right_180 && !c->left_90);
+        heading_updated = 1U;
+    }
     if (CAR_MECANUM_TEST_MODE && !ButtonsReleased(c)) {
         Mecanum_Test_Process(0U);
         if (state == CAR_RUNNING) NormalStop();
@@ -883,19 +882,19 @@ void Car_Control_Process(void)
     if (ProcessTurn(c, edge_90, edge_180, edge_left)) goto finish;
     if (ProcessButtons(c, fresh)) goto finish;
     if (CAR_MECANUM_TEST_MODE) {
-        allow = (uint8_t)(powered && Bluetooth_IsConnected() &&
-            !Motor_HasFault() && Centered(c));
+        allow = (uint8_t)(powered && RemoteConnected() &&
+            !Motor_HasFault());
         if (!allow && mecanum_test_active && (state == CAR_READY || state == CAR_RUNNING))
             (void)Motor_EStopAll();
         Mecanum_Test_Process(allow);
         Transition(mecanum_test_active ? CAR_RUNNING : CAR_READY);
-    } else if (ButtonsReleased(c)) ProcessJoystick(c);
+    }
 finish:
     if (!heading_updated) {
         (void)Heading_Update(false);
-        test_seen = heading_test_request;
     }
     if (!CAR_PD10_STANDALONE_TEST)
-        LogControlDiagnostics(&Bluetooth_GetControl()->frame);
+        LogControlDiagnostics(&remote_input.command);
     Heading_Log(log_vx, log_vy, log_rotation);
+    if (!CAR_PD10_STANDALONE_TEST && !CAR_MECANUM_TEST_MODE) RemoteHeading_Log();
 }

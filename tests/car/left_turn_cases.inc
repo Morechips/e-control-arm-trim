@@ -101,15 +101,15 @@ static void TestLeftRemoteTurn(void)
     {
         Step(10U); ImuSample(90.0f, 0.0f); Loop();
     }
-    assert(TurnRight_GetStatus()->state == TURN_RIGHT_RESETTING);
-    Step(10U); ImuSample(0.0f, 0.0f); Loop();
+    assert(TurnRight_GetStatus()->state == TURN_RIGHT_DONE);
+    Step(10U); ImuSample(90.0f, 0.0f); Loop();
     assert(Car_Control_GetState() == CAR_READY);
     LeftControlFrame(c); Step(40U);
     assert(Car_Control_GetState() == CAR_READY && Count(0xF6) == speed);
     c.left_90 = 0; LeftControlFrame(c); Step(40U);
     c.left_90 = 1; LeftControlFrame(c); Step(40U);
     assert(Car_Control_GetState() == CAR_TURNING);
-    ImuSample(0.0f, 0.0f); Loop();
+    ImuSample(90.0f, 0.0f); Loop();
     c.left_90 = 0; LeftControlFrame(c); Step(40U);
     assert(Car_Control_GetState() == CAR_TURNING);
     speed = Count(0xF6);
@@ -118,7 +118,7 @@ static void TestLeftRemoteTurn(void)
     LeftControlFrame(c); Step(40U);
     assert(Car_Control_GetState() == CAR_READY && Count(0xF6) == speed);
     c.right_90 = 0; LeftControlFrame(c); Step(40U);
-    ImuSample(0.0f, 0.0f); Loop();
+    ImuSample(90.0f, 0.0f); Loop();
     c.left_90 = 1; LeftControlFrame(c); Step(40U);
     assert(Car_Control_GetState() == CAR_TURNING && Count(0xF6) > speed);
     c.stop = 1; LeftControlFrame(c); Step(40U);

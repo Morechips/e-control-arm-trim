@@ -17,6 +17,6 @@ uint16_t USART2_DMA_ReadTimed(uint8_t *p,uint16_t capacity,uint32_t *tick)
 { (void)p;(void)capacity;*tick=HAL_GetTick();return 0; }
 HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *u,const uint8_t *p,uint16_t n,uint32_t timeout)
 {
-    assert(u==&huart2 && n==5 && timeout==5);
+    assert(u==&huart2 && n==5 && timeout==10);
     memcpy(mock_reset_bytes,p,5);mock_reset_count++;return mock_reset_result;
 }

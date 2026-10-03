@@ -162,16 +162,11 @@ void RouteFSM_Update(void)
 
     if (completed_action == ACTION_TASK_1 || completed_action == ACTION_TASK_2)
     {
-        uint8_t command = completed_action == ACTION_TASK_1 ?
-                          MODE_CMD_AIM : MODE_CMD_OBJECT;
-        HAL_StatusTypeDef status;
-        if (command == MODE_CMD_AIM && !qr_stage_done) { EnterError(); return; }
-        status = MaxiCam_SendMode(command);
-        if (status == HAL_BUSY) return;
-        if (status != HAL_OK) { EnterError(); return; }
-        Debug_Log(command == MODE_CMD_AIM ?
-                  "[MAXICAM] aim mode sent\r\n" :
-                  "[MAXICAM] object mode sent\r\n");
+        /* The camera accepts the mode byte only after a QR notification and has
+         * no acknowledge, so this records the request: MaxiCam_Process() sends
+         * and retries it. A pending mode must not wedge the route. */
+        MaxiCam_RequestMode(completed_action == ACTION_TASK_1 ? MAXICAM_MODE_AIM
+                                                             : MAXICAM_MODE_OBJECT);
     }
 
     (void)snprintf(text, sizeof(text), "[ROUTE] step=%lu DONE\r\n",

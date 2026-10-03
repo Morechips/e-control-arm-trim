@@ -21,7 +21,6 @@
 #define ARM_TUNER_DUAL_REFERENCE_MS 2000U
 #define ARM_TUNER_DUAL_RESTART_SETTLE_MS 300U
 #define ARM_TUNER_DUAL_CENTER_SAMPLES 1U
-#define ARM_TUNER_PRESET_MOVE_MS 1500U
 
 /* Init once after Bluetooth_Init, PID_Tuner_Init and Arm_Init; silent.
  * No flash writes, position feedback, preset poses or task automation.

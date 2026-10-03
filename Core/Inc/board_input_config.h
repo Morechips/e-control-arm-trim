@@ -1,0 +1,82 @@
+#ifndef BOARD_INPUT_CONFIG_H
+#define BOARD_INPUT_CONFIG_H
+#include "main.h"
+#include "car_config.h"
+#include "start_button_config.h"
+/* PE0 is active low; the test button connects the pin to ground. */
+#ifndef VISION_BUTTON_GPIO_PORT
+#define VISION_BUTTON_GPIO_PORT GPIOE
+#endif
+#ifndef VISION_BUTTON_GPIO_PIN
+#define VISION_BUTTON_GPIO_PIN GPIO_PIN_0
+#endif
+#ifndef VISION_BUTTON_GPIO_CLK_ENABLE
+#define VISION_BUTTON_GPIO_CLK_ENABLE() __HAL_RCC_GPIOE_CLK_ENABLE()
+#endif
+#ifndef VISION_BUTTON_DEBOUNCE_MS
+#define VISION_BUTTON_DEBOUNCE_MS 20U
+#endif
+/* PC1 uses the same active-low, pull-up wiring as the PE0 test button. */
+#ifndef SHOT_BUTTON_GPIO_PORT
+#define SHOT_BUTTON_GPIO_PORT GPIOC
+#endif
+#ifndef SHOT_BUTTON_GPIO_PIN
+#define SHOT_BUTTON_GPIO_PIN GPIO_PIN_1
+#endif
+#ifndef SHOT_BUTTON_GPIO_CLK_ENABLE
+#define SHOT_BUTTON_GPIO_CLK_ENABLE() __HAL_RCC_GPIOC_CLK_ENABLE()
+#endif
+#ifndef SHOT_BUTTON_DEBOUNCE_MS
+#define SHOT_BUTTON_DEBOUNCE_MS 20U
+#endif
+/* PB8 uses the MCU internal pull-up; pressing the button connects it to GND. */
+#ifndef LASER_BUTTON_GPIO_PORT
+#define LASER_BUTTON_GPIO_PORT GPIOB
+#endif
+#ifndef LASER_BUTTON_GPIO_PIN
+#define LASER_BUTTON_GPIO_PIN GPIO_PIN_8
+#endif
+#ifndef LASER_BUTTON_GPIO_CLK_ENABLE
+#define LASER_BUTTON_GPIO_CLK_ENABLE() __HAL_RCC_GPIOB_CLK_ENABLE()
+#endif
+#ifndef LASER_BUTTON_DEBOUNCE_MS
+#define LASER_BUTTON_DEBOUNCE_MS 20U
+#endif
+/* PE4 AIM button: internal pull-up, pressed to ground. */
+#ifndef SERVO_BUTTON_GPIO_PORT
+#define SERVO_BUTTON_GPIO_PORT GPIOE
+#endif
+#ifndef SERVO_BUTTON_GPIO_PIN
+#define SERVO_BUTTON_GPIO_PIN GPIO_PIN_4
+#endif
+#ifndef SERVO_BUTTON_GPIO_CLK_ENABLE
+#define SERVO_BUTTON_GPIO_CLK_ENABLE() __HAL_RCC_GPIOE_CLK_ENABLE()
+#endif
+#ifndef SERVO_BUTTON_DEBOUNCE_MS
+#define SERVO_BUTTON_DEBOUNCE_MS 20U
+#endif
+#ifndef BOARD_PD10_GPIO_PORT
+#define BOARD_PD10_GPIO_PORT GPIOD
+#endif
+#ifndef BOARD_PD10_GPIO_PIN
+#define BOARD_PD10_GPIO_PIN GPIO_PIN_10
+#endif
+#ifndef BOARD_PD10_DEBOUNCE_MS
+#define BOARD_PD10_DEBOUNCE_MS 20U
+#endif
+#ifndef BOARD_DISPLAY_GPIO_CLK_ENABLE
+#define BOARD_DISPLAY_GPIO_CLK_ENABLE() __HAL_RCC_GPIOD_CLK_ENABLE()
+#endif
+#ifndef BOARD_PD10_GPIO_CLK_ENABLE
+#define BOARD_PD10_GPIO_CLK_ENABLE() __HAL_RCC_GPIOD_CLK_ENABLE()
+#endif
+#ifndef BOARD_DISPLAY_GPIO_PORT
+#define BOARD_DISPLAY_GPIO_PORT GPIOD
+#endif
+#ifndef BOARD_DISPLAY_GPIO_PINS
+#define BOARD_DISPLAY_GPIO_PINS (GPIO_PIN_10 | GPIO_PIN_11 | GPIO_PIN_14 | GPIO_PIN_15)
+#endif
+#ifndef BOARD_DISPLAY_DEBOUNCE_MS
+#define BOARD_DISPLAY_DEBOUNCE_MS 20U
+#endif
+#endif

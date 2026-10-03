@@ -125,6 +125,7 @@ static void TestTargetAndWrap(void)
 static void TestRuntimePIDAndClamp(void)
 {
     unsigned i;float first;
+    const HeadingPIDParameters defaults = {HEADING_KP,HEADING_KI,HEADING_KD};
     Reset();Establish(0);now+=10;Sample(6,2);Heading_Update(true);
     assert(Heading_SetPID(0.5f,0,0));Heading_Update(true);
     assert(fabsf(Heading_GetStatus()->omega_correction+0.5f*Heading_GetStatus()->yaw_error)<0.0001f);
@@ -144,9 +145,7 @@ static void TestRuntimePIDAndClamp(void)
     assert(fabsf(Heading_GetStatus()->omega_correction-MAX_YAW_CORRECTION_RPM)<0.001f);
     assert(!Heading_SetPID(-1,0,0) && !Heading_SetPID(0,-1,0) && !Heading_SetPID(0,0,-1));
     assert(!Heading_SetPID(NAN,0,0) && !Heading_SetPID(0,INFINITY,0));
-    Heading_Init();assert(fabsf(Heading_GetPID()->kp-HEADING_KP)<0.000001f &&
-                          fabsf(Heading_GetPID()->ki-HEADING_KI)<0.000001f &&
-                          fabsf(Heading_GetPID()->kd-HEADING_KD)<0.000001f);
+    Heading_Init();assert(Heading_GetPID()->kp==defaults.kp && Heading_GetPID()->ki==defaults.ki && Heading_GetPID()->kd==defaults.kd);
     puts("PASS runtime PID: live gains / elapsed-time I / no call-count integration / 100 RPM clamp / bounds / defaults");
 }
 

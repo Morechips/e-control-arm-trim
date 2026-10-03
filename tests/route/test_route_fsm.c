@@ -1,3 +1,7 @@
+#include "board_inputs.h"
+#include "board_input_config.h"
+#include "car_control.h"
+#include "uart_driver.h"
 #include "route_fsm.h"
 #include "turn_right.h"
 #include "car_config.h"
@@ -21,7 +25,7 @@ static char logs[160][80];
 static size_t log_count;
 UART_HandleTypeDef huart4;
 GPIO_TypeDef mock_gpioc;
-GPIO_TypeDef mock_gpiob;
+GPIO_TypeDef mock_gpiob, mock_gpiod, mock_gpioe;
 static uint32_t laser_pin_mode;
 static unsigned laser_low_count;
 static unsigned laser_float_count;
@@ -29,10 +33,10 @@ static unsigned button_config_count;
 static uint8_t mode_bytes[8];
 static size_t mode_count, mode_attempts;
 static HAL_StatusTypeDef next_mode_result = HAL_OK;
-static SerialRx *qr_receiver;
 
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *gpio)
 {
+    if (port == GPIOD || port == GPIOE || (port == GPIOC && gpio->Pin == GPIO_PIN_1)) return;
     if (port == GPIOB)
     {
         assert(gpio->Pin == GPIO_PIN_8 && gpio->Mode == GPIO_MODE_INPUT &&
@@ -67,50 +71,12 @@ HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *uart, const uint8_t *dat
     return result;
 }
 
-void Serial_Init(SerialRx *rx, UART_HandleTypeDef *uart)
-{
-    memset(rx, 0, sizeof(*rx));
-    rx->uart = uart;
-    qr_receiver = rx;
-}
-
-void Serial_RxCallback(SerialRx *rx, UART_HandleTypeDef *uart)
-{
-    uint16_t next;
-    if (rx->uart != uart) return;
-    next = (uint16_t)((rx->head + 1U) % SERIAL_RX_SIZE);
-    assert(next != rx->tail);
-    rx->data[rx->head] = rx->byte;
-    rx->head = next;
-}
-
-void Serial_ErrorCallback(SerialRx *rx, UART_HandleTypeDef *uart)
-{
-    if (rx->uart == uart) rx->broken = 1U;
-}
-
-uint8_t Serial_Recover(SerialRx *rx)
-{
-    uint8_t broken = rx->broken;
-    rx->broken = 0U;
-    return broken;
-}
-
-uint8_t Serial_Pop(SerialRx *rx, uint8_t *byte, uint32_t *tick)
-{
-    if (rx->tail == rx->head) return 0U;
-    *byte = rx->data[rx->tail];
-    *tick = now;
-    rx->tail = (uint16_t)((rx->tail + 1U) % SERIAL_RX_SIZE);
-    return 1U;
-}
-
 static void ReceiveQRByte(uint8_t byte)
 {
     size_t before = event_count;
     bool was_success = qr_success;
     ExecState state = ActionFSM_GetState();
-    qr_receiver->byte = byte;
+    *huart4.rx = byte;
     MaxiCam_RxCallback(&huart4);
     assert(qr_success == was_success && event_count == before);
     MaxiCam_Process();
@@ -118,7 +84,9 @@ static void ReceiveQRByte(uint8_t byte)
     assert(event_count == before && ActionFSM_GetState() == state);
 }
 
+void Car_Control_SubmitLocalInput(const CarLocalInput_t *input) { (void)input; }
 uint32_t HAL_GetTick(void) { return now; }
+uint8_t Debug_CanLog(uint8_t count) { (void)count; return 1U; }
 uint8_t Motor_IsIdle(void) { return motor_idle; }
 uint8_t Motor_HasFault(void) { return motor_fault; }
 void Debug_Log(const char *text)
@@ -210,7 +178,8 @@ static void Reset(void)
     mode_count = mode_attempts = 0U;
     next_mode_result = HAL_OK;
     mock_gpiob.IDR = GPIO_PIN_8;
-    Laser_Init();
+    mock_gpioc.IDR = mock_gpiod.IDR = mock_gpioe.IDR = UINT16_MAX;
+    Laser_Init(); BoardInputs_Init();
     MissionFSM_Init();
     MaxiCam_Init();
     assert(laser_pin_mode == GPIO_MODE_INPUT && laser_low_count == 0U);
@@ -230,7 +199,7 @@ static void ReceiveTarget(uint8_t type, int16_t offset_x, int16_t offset_y)
     ExecState state = ActionFSM_GetState();
     for (i = 0U; i < sizeof(bytes); ++i)
     {
-        qr_receiver->byte = bytes[i];
+        *huart4.rx = bytes[i];
         MaxiCam_RxCallback(&huart4);
         MaxiCam_Process();
     }
@@ -400,12 +369,26 @@ static void TestRouteModeSwitches(void)
     unsigned i;
     TestCompleteRoute();
     CompleteRouteTask1();
-    next_mode_result = HAL_BUSY;
+    /* Task 1 records an AIM request and advances the route immediately: the
+     * camera only accepts the byte after a QR notification, so nothing is
+     * transmitted yet and no error can be latched. Clear the latch that the
+     * route's own QR stage already set, to exercise the deferral branch. */
+    MaxiCam_ResetQrNotice();
     RouteFSM_Update();
-    assert(route_index == 8U && mode_attempts == 1U && mode_count == 0U);
-    RouteFSM_Update();
-    assert(route_index == 9U && mode_attempts == 2U && mode_count == 1U);
-    assert(mode_bytes[0] == MODE_CMD_AIM);
+    assert(route_index == 9U && mode_attempts == 0U && mode_count == 0U);
+    assert(MaxiCam_ModePending() && RouteFSM_GetState() != ROUTE_ERROR);
+    MaxiCam_Process();
+    assert(mode_attempts == 0U && mode_count == 0U && MaxiCam_ModePending());
+
+    /* One QR notice releases the request without waiting for the retry gap. */
+    ReceiveQRByte(QR_SUCCESS_CODE);
+    assert(MaxiCam_QrNotified());
+    MaxiCam_Process();
+    assert(mode_count == 1U && mode_bytes[0] == MODE_CMD_AIM);
+    assert(!MaxiCam_ModePending());
+
+    /* ACTION_TURN_LEFT is the brake-and-wait placeholder: it reaches EXEC_BRAKE
+     * and stays there until the completion event, because the motor is busy. */
     RouteFSM_Update();
     RouteFSM_Update();
     ActionFSM_SetTurnLeftDone(true);
@@ -437,22 +420,53 @@ static void TestRouteModeSwitches(void)
     assert(MissionFSM_GetState() == TASK2_LASER_ON && Laser_IsEnabled());
     next_mode_result = HAL_BUSY;
     now += LASER_HOLD_MS;
-    RouteFSM_Update();
-    assert(route_index == 11U && task2_done && !Laser_IsEnabled());
-    assert(mode_count == 1U && mode_attempts == 3U);
-    RouteFSM_Update();
-    assert(route_index == 12U && mode_count == 2U && mode_attempts == 4U);
-    assert(mode_bytes[1] == MODE_CMD_OBJECT && laser_pin_mode == GPIO_MODE_INPUT);
+    RouteFSM_Update(); /* ACTION_TASK_2 completes and requests OBJECT mode */
+    assert(route_index == 12U && task2_done && !Laser_IsEnabled());
+    MaxiCam_Process(); /* first attempt fails */
+    assert(mode_count == 1U && MaxiCam_ModePending());
+    assert(RouteFSM_GetState() != ROUTE_ERROR);
+    next_mode_result = HAL_OK;
+    now += MAXICAM_MODE_RETRY_GAP_MS;
+    MaxiCam_Process(); /* retry succeeds */
+    assert(mode_count == 2U && mode_bytes[1] == MODE_CMD_OBJECT && !MaxiCam_ModePending());
+    assert(laser_pin_mode == GPIO_MODE_INPUT);
 
+    /* A transmit failure must never latch ROUTE_ERROR: the request simply stays
+     * pending for a later attempt. */
     for (i = 0U; i < 2U; ++i)
     {
         TestCompleteRoute();
         CompleteRouteTask1();
         next_mode_result = i == 0U ? HAL_ERROR : HAL_TIMEOUT;
+        MaxiCam_ResetQrNotice(); /* no notice yet: still deferred */
         RouteFSM_Update();
-        assert(RouteFSM_GetState() == ROUTE_ERROR && mode_count == 0U);
+        assert(RouteFSM_GetState() != ROUTE_ERROR && mode_count == 0U);
+        assert(MaxiCam_ModePending());
         assert(laser_pin_mode == GPIO_MODE_INPUT);
     }
+}
+
+/* The deferral/retry timing is exercised on its own so that the extra elapsed
+ * time cannot disturb the mission FSM's settle timers. */
+static void TestCameraModeRetry(void)
+{
+    TestCompleteRoute();
+    CompleteRouteTask1();
+    MaxiCam_ResetQrNotice();
+    next_mode_result = HAL_BUSY;
+    RouteFSM_Update(); /* task 1 completes and requests AIM */
+    assert(route_index == 9U && mode_attempts == 0U);
+    MaxiCam_Process();
+    assert(mode_attempts == 0U && MaxiCam_ModePending()); /* deferred */
+    ReceiveQRByte(QR_SUCCESS_CODE);
+    MaxiCam_Process(); /* first attempt fails */
+    assert(mode_attempts == 1U && mode_count == 0U && MaxiCam_ModePending());
+    assert(RouteFSM_GetState() != ROUTE_ERROR);
+    next_mode_result = HAL_OK;
+    now += MAXICAM_MODE_RETRY_GAP_MS;
+    MaxiCam_Process(); /* retry succeeds */
+    assert(mode_attempts == 2U && mode_count == 1U && mode_bytes[0] == MODE_CMD_AIM);
+    assert(!MaxiCam_ModePending() && RouteFSM_GetState() != ROUTE_ERROR);
 }
 
 static void TestBusyAndError(void)
@@ -1131,62 +1145,62 @@ static void TestManualLaserButton(void)
     Reset();
     assert(!Laser_IsEnabled() && laser_pin_mode == GPIO_MODE_INPUT);
     mock_gpiob.IDR = 0U;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     now += LASER_BUTTON_DEBOUNCE_MS - 1U;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     assert(!Laser_IsEnabled() && laser_low_count == 0U);
     mock_gpiob.IDR = GPIO_PIN_8;
-    Laser_ProcessButton(); /* A short press must not trigger PC3. */
+    BoardInputs_ProcessAux(); /* A short press must not trigger PC3. */
     assert(!Laser_IsEnabled());
     mock_gpiob.IDR = 0U;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     now += LASER_BUTTON_DEBOUNCE_MS;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     assert(Laser_IsEnabled() && laser_pin_mode == GPIO_MODE_OUTPUT_OD);
     assert(laser_low_count == 1U);
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     assert(laser_low_count == 1U); /* Held button causes no repeated GPIO writes. */
     mock_gpiob.IDR = GPIO_PIN_8;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     assert(!Laser_IsEnabled() && laser_pin_mode == GPIO_MODE_INPUT);
 
     Reset();
     now = UINT32_MAX - 10U;
     mock_gpiob.IDR = 0U;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     now += LASER_BUTTON_DEBOUNCE_MS - 1U;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     assert(!Laser_IsEnabled());
     ++now;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     assert(Laser_IsEnabled()); /* Debounce works across HAL tick wrap. */
     mock_gpiob.IDR = GPIO_PIN_8;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     assert(!Laser_IsEnabled());
 
     Reset();
     Laser_Enable();
     assert(Laser_IsEnabled() && laser_low_count == 1U);
     mock_gpiob.IDR = 0U;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     now += LASER_BUTTON_DEBOUNCE_MS;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     Laser_Disable();
     assert(Laser_IsEnabled() && laser_pin_mode == GPIO_MODE_OUTPUT_OD);
     assert(laser_low_count == 1U);
     mock_gpiob.IDR = GPIO_PIN_8;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     assert(!Laser_IsEnabled() && laser_pin_mode == GPIO_MODE_INPUT);
 
     Reset();
     mock_gpiob.IDR = 0U;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     now += LASER_BUTTON_DEBOUNCE_MS;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     assert(Laser_IsEnabled() && laser_low_count == 1U);
     Laser_Enable();
     mock_gpiob.IDR = GPIO_PIN_8;
-    Laser_ProcessButton();
+    BoardInputs_ProcessAux();
     assert(Laser_IsEnabled() && laser_pin_mode == GPIO_MODE_OUTPUT_OD);
     assert(laser_low_count == 1U);
     Laser_Disable();
@@ -1200,7 +1214,7 @@ int main(void)
     assert(SpeedMode_GetRPM(SPEED_MEDIUM) == 133U);
     assert(SpeedMode_GetRPM(SPEED_FULL) == 167U);
     assert(SpeedMode_GetRPM((SpeedMode)99) == SPEED_PRECISE_RPM);
-    TestRouteModeSwitches(); TestBusyAndError();
+    TestRouteModeSwitches(); TestCameraModeRetry(); TestBusyAndError();
     TestQRSearch(); TestQRBeforeSearch(); TestQRSearchBusyFaultAndRestart();
     TestQRSearchStopIsolation();
     TestMaxiCamAlignmentDirections(); TestMaxiCamAlignmentConfirmation();

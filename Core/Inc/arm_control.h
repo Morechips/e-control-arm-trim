@@ -2,7 +2,7 @@
 #define ARM_CONTROL_H
 
 #include "arm_config.h"
-#include "zlis2_driver.h"
+#include "servo.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -74,7 +74,7 @@ typedef struct
 {
     ArmState_t state;
     ArmError_t error;
-    ZLIS2_Status transport_result;
+    ServoStatus_t transport_result;
     bool motion_allowed;
     bool stop_delivery_failed;
     size_t step_index;
@@ -82,10 +82,10 @@ typedef struct
 } ArmStatus_t;
 
 /* Single foreground owner; not callable from an ISR or concurrently.
- * ZLIS2 must already be bound by Board_Init. Init is silent and idempotent.
+ * Servo must already be bound by Board_Init. Init is silent and idempotent.
  * The default config has NO enabled or calibrated joints, IDs unassigned.
  * Configure validates and copies config, emits no bytes, and revokes permission.
- * Never use raw ZLIS2 motion/action-group APIs concurrently with this module. */
+ * Never use raw Servo motion/action-group APIs concurrently with this module. */
 void Arm_Init(void);
 void Arm_DefaultConfig(ArmConfig_t *config);
 /* Loads this robot's bench-confirmed servo IDs and numeric P limits. This
@@ -101,10 +101,17 @@ ArmResult_t Arm_SetMotionAllowed(bool allowed);
 ArmResult_t Arm_MoveJoint(ArmJoint_t joint, uint16_t position,
                           uint16_t move_ms, uint32_t hold_ms);
 ArmResult_t Arm_StartSequence(const ArmStep_t *steps, size_t count);
-/* Original presets retain their P values, but planar joints must obey the
- * configured joint travel. Only the legacy gripper uses controller bounds
- * 500..2500. Authorization, busy and fault gates still apply. */
+/* Explicit phone bool presets use the supplied original P values, including
+ * positions outside this robot's calibrated ranges. Controller bounds and
+ * the normal arm authorization, busy and fault gates still apply. */
 ArmResult_t Arm_StartOriginalPreset(const ArmStep_t *step);
+/* Bluetooth RST pose: sends all four configured IDs immediately without T.
+ * Requires motion permission and an idle, fault-free arm. Completion is only
+ * estimated by a software guard because the controller supplies no feedback. */
+ArmResult_t Arm_StartResetPose(void);
+/* Bluetooth AIM pose: send four configured IDs in one untimed command.
+ * Uses normal motion permission, idle/fault gates and calibrated limits. */
+ArmResult_t Arm_StartAimPose(void);
 /* Sends $RST! only while the arm is idle; does not clear a latched fault. */
 ArmResult_t Arm_ResetController(void);
 /* PE4 manual override: validate and transmit one step immediately on USART3.
@@ -113,7 +120,7 @@ ArmResult_t Arm_ResetController(void);
 ArmResult_t Arm_SendImmediate(const ArmStep_t *step);
 
 /* Call frequently. Waits are nonblocking, but each Process can perform ONE
- * existing blocking ZLIS2 UART transaction (up to ZLIS2_TX_TIMEOUT_MS).
+ * asynchronous Servo submission.
  * Completion is timing-based only: no position/force/grasp feedback is parsed.
  * Late service while RUNNING triggers a stop request when Process resumes.
  * This software deadline cannot stop hardware while the MCU is stalled. */
@@ -128,11 +135,6 @@ ArmResult_t Arm_Stop(void);
  * all stop attempts finish; leaves motion permission false. */
 ArmResult_t Arm_ClearFault(void);
 ArmStatus_t Arm_GetStatus(void);
-
-/* Independent executor reservation; raw motion callers must honor it too. */
-ArmResult_t Arm_AcquireExternalMotion(void (*stop)(void *user), void *user);
-ArmResult_t Arm_ReleaseExternalMotion(void *user);
-bool Arm_ExternalMotionOwned(void);
 
 #endif
 

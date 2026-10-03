@@ -21,6 +21,11 @@ void Heading_Init(void);
 /* End the current manual motion segment. The next permitted motion captures
  * the current IMU yaw as its own heading reference. */
 void Heading_ClearReference(void);
+/* Suspend output and integral without forgetting the reference/target. */
+void Heading_Suspend(void);
+bool Heading_SetReference(float raw_yaw, float target_degrees);
+int16_t Heading_UpdateWithLimits(bool motion_allowed, float start_degrees,
+                                float stop_degrees, float max_rpm);
 /* Foreground only. Returns a bounded wheel-equivalent RPM yaw correction.
  * Invalid/stale IMU data always returns zero. */
 int16_t Heading_Update(bool motion_allowed);

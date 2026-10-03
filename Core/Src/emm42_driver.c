@@ -1,3 +1,5 @@
+#include "uart_tx_queue.h"
+#include "uart_driver.h"
 #include "emm42_driver.h"
 #include "serial_io.h"
 #include <stdio.h>
@@ -10,20 +12,20 @@
 #define ACK_OK 0x02U
 #define ACK_CONDITION 0xE2U
 #define ACK_ERROR 0xEEU
-#define TX_QUEUE_SIZE 16U
 
-typedef struct { uint8_t bytes[8]; uint16_t length; } MotorFrame;
-static MotorFrame queue[TX_QUEUE_SIZE], transmitting;
-static uint8_t head, tail;
-static volatile uint8_t active, fault;
-static volatile uint32_t completed_tick;
-static uint32_t started_tick;
-static SerialRx rx;
+static uint8_t queue_storage[15][8], current[8];
+static uint16_t lengths[15];
+static uint32_t tags[15];
+static UartTxQueue_t tx;
+static volatile uint8_t fault;
+static UartRx_t rx;
 static Emm42Status_t statuses[5];
 static uint8_t reply[4], reply_used;
 static volatile uint32_t stop_requests, uart5_errors, tx_timeouts, tx_start_errors;
 static volatile uint8_t stop_start_mask, stop_done_mask, stop_ack_mask;
-static uint32_t stop_diag_ms, transmitting_stop_request;
+static uint32_t stop_diag_ms;
+static uint8_t log_pending, log_address;
+static int32_t log_physical;
 
 static void LogStopDiagnostics(void)
 {
@@ -44,14 +46,33 @@ static void LogStopDiagnostics(void)
     Debug_Log(line);
 }
 static uint8_t AddressValid(uint8_t addr) { return (uint8_t)(addr >= 1U && addr <= 4U); }
+static void RxError(UART_HandleTypeDef *uart)
+{
+    (void)uart; ++uart5_errors; fault = 1U;
+}
+static void TxEvent(UartTxQueue_t *q, UartQueueEvent_t event, const uint8_t *bytes,
+                    uint16_t length, uint32_t tag, HAL_StatusTypeDef result)
+{
+    (void)q; (void)length; (void)result;
+    if (event == UART_QUEUE_TIMED_OUT) {
+        ++tx_timeouts; fault = 1U; (void)Emm42_EStopAll();
+    } else if (event == UART_QUEUE_START_FAILED) { ++tx_start_errors; fault = 1U; }
+    else if (event == UART_QUEUE_STARTED) {
+        if (bytes[1] == CMD_STOP && AddressValid(bytes[0]))
+            stop_start_mask |= (uint8_t)(1U << (bytes[0] - 1U));
+        if (CAR_MECANUM_TEST_MODE && bytes[1] == CMD_SPEED) {
+            log_address = bytes[0];
+            log_physical = (int32_t)((uint16_t)bytes[3] * 256U + bytes[4]);
+            if (bytes[2] != 0U) log_physical = -log_physical;
+            log_pending = 1U;
+        }
+    } else if (event == UART_QUEUE_COMPLETED && bytes[1] == CMD_STOP &&
+               tag == stop_requests && AddressValid(bytes[0]))
+        stop_done_mask |= (uint8_t)(1U << (bytes[0] - 1U));
+}
 static HAL_StatusTypeDef Enqueue(const uint8_t *bytes, uint16_t length)
 {
-    uint8_t next = (uint8_t)((head + 1U) % TX_QUEUE_SIZE);
-    if (next == tail) return HAL_BUSY;
-    memcpy(queue[head].bytes, bytes, length);
-    queue[head].length = length;
-    head = next;
-    return HAL_OK;
+    return UART_TxQueue_Submit(&tx, bytes, length, bytes[1] == CMD_STOP ? stop_requests : 0U);
 }
 static HAL_StatusTypeDef EnableFrame(uint8_t addr, uint8_t en)
 {
@@ -81,18 +102,22 @@ static HAL_StatusTypeDef StopFrame(uint8_t addr)
 }
 void Emm42_Init(void)
 {
-    head = tail = active = fault = reply_used = 0U;
+    const UartTxQueueConfig_t config = {
+        .policy = UART_QUEUE_FIFO, .capacity = 15U, .frame_size = 8U,
+        .timeout_ms = MOTOR_TX_TIMEOUT_MS, .gap_ms = MOTOR_FRAME_GAP_MS,
+        .retain_failed = 1U, .notify = TxEvent
+    };
+    (void)UART_TxQueue_Init(&tx, &huart5, &config, &queue_storage[0][0], lengths, tags, current);
+    fault = reply_used = log_pending = 0U;
     stop_requests = uart5_errors = tx_timeouts = tx_start_errors = 0U;
     stop_start_mask = stop_done_mask = stop_ack_mask = 0U;
     stop_diag_ms = HAL_GetTick();
-    transmitting_stop_request = 0U;
     memset(statuses, 0, sizeof(statuses));
-    completed_tick = HAL_GetTick() - MOTOR_FRAME_GAP_MS;
-    Serial_Init(&rx, &huart5);
+    (void)UART_BindRx(&rx, &huart5, NULL, RxError);
     (void)Emm42_EStopAll();
     (void)Emm42_DisableAll(); /* MCU reset must not retain an old motor target. */
 }
-uint8_t Emm42_IsIdle(void) { return (uint8_t)(!active && head == tail); }
+uint8_t Emm42_IsIdle(void) { return UART_TxQueue_IsIdle(&tx); }
 HAL_StatusTypeDef Emm42_Enable(uint8_t addr)
 {
     if (!AddressValid(addr) || fault) return HAL_ERROR;
@@ -111,7 +136,7 @@ HAL_StatusTypeDef Emm42_EnableAll(void)
 HAL_StatusTypeDef Emm42_DisableAll(void)
 {
     uint8_t addr;
-    uint8_t free_slots = (uint8_t)((tail + TX_QUEUE_SIZE - head - 1U) % TX_QUEUE_SIZE);
+    uint16_t free_slots = UART_TxQueue_Free(&tx);
     if (free_slots < 4U) return HAL_BUSY;
     for (addr = 1U; addr <= 4U; ++addr) (void)EnableFrame(addr, 0U);
     return HAL_OK;
@@ -136,7 +161,7 @@ HAL_StatusTypeDef Emm42_SetSpeedSync4(int16_t a, int16_t b, int16_t c, int16_t d
 HAL_StatusTypeDef Emm42_EStop(uint8_t addr)
 {
     if (!AddressValid(addr)) return HAL_ERROR;
-    head = tail = 0U; /* Cancel unsent speed frames and the sync trigger. */
+    UART_TxQueue_CancelPending(&tx, 0U); /* Keep the in-flight frame. */
     return StopFrame(addr);
 }
 HAL_StatusTypeDef Emm42_EStopAll(void)
@@ -144,28 +169,20 @@ HAL_StatusTypeDef Emm42_EStopAll(void)
     uint8_t addr;
     stop_requests++;
     stop_start_mask = stop_done_mask = stop_ack_mask = 0U;
-    head = tail = 0U;
+    UART_TxQueue_CancelPending(&tx, 1U);
     /* Finish at most ONE in-flight frame to avoid corrupting the wire protocol.
      * No other normal frame is launched by an ISR. Stops take the next slots. */
     for (addr = 1U; addr <= 4U; ++addr) (void)StopFrame(addr);
-    completed_tick = HAL_GetTick() - MOTOR_FRAME_GAP_MS;
     return HAL_OK;
 }
-void Emm42_RxCallback(UART_HandleTypeDef *uart) { Serial_RxCallback(&rx, uart); }
+void Emm42_RxCallback(UART_HandleTypeDef *uart) { UART_RxCallback(uart); }
 void Emm42_ErrorCallback(UART_HandleTypeDef *uart)
 {
-    Serial_ErrorCallback(&rx, uart);
-    if (uart == &huart5) { uart5_errors++; fault = 1U; }
+    UART_ErrorCallback(uart);
 }
 void Emm42_TxCallback(UART_HandleTypeDef *uart)
 {
-    if (uart == &huart5) {
-        if (transmitting.bytes[1] == CMD_STOP &&
-            transmitting_stop_request == stop_requests &&
-            AddressValid(transmitting.bytes[0]))
-            stop_done_mask |= (uint8_t)(1U << (transmitting.bytes[0] - 1U));
-        completed_tick = HAL_GetTick(); active = 0U;
-    }
+    if (uart == &huart5) UART_TxQueue_Complete(&tx);
 }
 void Emm42_ProcessRx(const uint8_t *data, uint16_t length)
 {
@@ -203,40 +220,23 @@ void Emm42_Process(void)
 {
     uint8_t byte;
     uint32_t tick;
-    if (Serial_Recover(&rx)) { fault = 1U; reply_used = 0U; }
-    while (Serial_Pop(&rx, &byte, &tick)) Emm42_ProcessRx(&byte, 1U);
+    size_t received;
+    const uint8_t *pending;
+    if (UART_Recover(&huart5)) { fault = 1U; reply_used = 0U; }
+    while (UART_RECV(&byte, 1U, &huart5, &received, &tick) == HAL_OK && received != 0U)
+        Emm42_ProcessRx(&byte, 1U);
     LogStopDiagnostics();
-    if (active && (uint32_t)(HAL_GetTick() - started_tick) > MOTOR_TX_TIMEOUT_MS) {
-        tx_timeouts++;
-        (void)HAL_UART_AbortTransmit(&huart5);
-        active = 0U; fault = 1U;
-        (void)Emm42_EStopAll();
+    pending = UART_TxQueue_Peek(&tx);
+    if (fault && !UART_TxQueue_IsSending(&tx) && pending != NULL && pending[1] != CMD_STOP &&
+        !(pending[1] == CMD_ENABLE && pending[3] == 0U)) (void)Emm42_EStopAll();
+    (void)UART_TxQueue_Process(&tx);
+    if (log_pending) {
+        char text[80];
+        log_pending = 0U;
+        (void)snprintf(text, sizeof(text), "[UART5 TX_START] addr=%u physical=%ld RPM\r\n",
+                       (unsigned)log_address, (long)log_physical);
+        Debug_Log(text); /* Formatting stays outside the queue's short IRQ guard. */
     }
-    if (active || head == tail ||
-        (uint32_t)(HAL_GetTick() - completed_tick) < MOTOR_FRAME_GAP_MS) return;
-    /* A fault must not launch the remaining part of a normal transaction. */
-    if (fault && queue[tail].bytes[1] != CMD_STOP &&
-        !(queue[tail].bytes[1] == CMD_ENABLE && queue[tail].bytes[3] == 0U)) {
-        (void)Emm42_EStopAll();
-    }
-    transmitting = queue[tail];
-    transmitting_stop_request = stop_requests;
-    active = 1U;
-    started_tick = HAL_GetTick();
-    if (HAL_UART_Transmit_IT(&huart5, transmitting.bytes, transmitting.length) == HAL_OK) {
-        if (transmitting.bytes[1] == CMD_STOP && AddressValid(transmitting.bytes[0]))
-            stop_start_mask |= (uint8_t)(1U << (transmitting.bytes[0] - 1U));
-        tail = (uint8_t)((tail + 1U) % TX_QUEUE_SIZE);
-        if (CAR_MECANUM_TEST_MODE && transmitting.bytes[1] == CMD_SPEED) {
-            char text[80];
-            int32_t physical = (int32_t)((uint16_t)transmitting.bytes[3] * 256U + transmitting.bytes[4]);
-            if (transmitting.bytes[2] != 0U) physical = -physical;
-            (void)snprintf(text, sizeof(text), "[UART5 TX_START] addr=%u physical=%ld RPM\r\n",
-                           (unsigned)transmitting.bytes[0], (long)physical);
-            Debug_Log(text); /* Frame submitted to UART, not motor feedback. */
-        }
-    }
-    else { active = 0U; fault = 1U; tx_start_errors++; }
 }
 const Emm42Status_t *Emm42_GetLastStatus(uint8_t addr)
 {

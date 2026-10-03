@@ -1,3 +1,4 @@
+#include "uart_driver.h"
 #include "jy61.h"
 #include "serial_io.h"
 #include "usart2_dma.h"
@@ -93,6 +94,7 @@ void JY61_Init(void)
     raw_probe_logged = false;
     jy61_checksum_errors = jy61_stream_errors = 0U;
     USART2_DMA_Init();
+    (void)UART_BindDma(&huart2, USART2_DMA_ReadTimed);
     stream_errors = StreamErrors();
     previous_byte_ms = diagnostics_ms = HAL_GetTick();
 }
@@ -157,8 +159,8 @@ void JY61_Parse(const uint8_t *data, uint16_t length, uint32_t received_ms)
 void JY61_Process(void)
 {
     uint8_t bytes[USART2_RX_BUFFER_SIZE];
-    uint32_t tick, errors;
-    uint16_t count;
+    uint32_t errors;
+    size_t count;
     USART2_DMA_Process();
     errors=StreamErrors();
     if (errors != stream_errors) {
@@ -166,8 +168,9 @@ void JY61_Process(void)
         used=0U; imu.gyro_valid=imu.yaw_valid=false;
         USART2_DMA_DiscardPending();
     }
-    count=USART2_DMA_ReadTimed(bytes,sizeof(bytes),&tick);
+    (void)UART_RECV(bytes, sizeof(bytes), &huart2, &count, NULL);
     if (count != 0U) {
+        uint32_t tick = UART_RxTick(&huart2);
         if (!raw_probe_logged && raw_probe_count < sizeof(raw_probe)) {
             uint16_t copy = (uint16_t)(sizeof(raw_probe) - raw_probe_count);
             if (copy > count) copy = count;
@@ -182,8 +185,8 @@ void JY61_Process(void)
 }
 HAL_StatusTypeDef JY61_ResetHeading(void)
 {
-    HAL_StatusTypeDef result=HAL_UART_Transmit(&huart2,jy61_heading_zero_cmd,
-                                             sizeof(jy61_heading_zero_cmd),JY61_RESET_TX_TIMEOUT_MS);
+    HAL_StatusTypeDef result=UART_SEND(jy61_heading_zero_cmd, sizeof(jy61_heading_zero_cmd),
+                                       &huart2, UART_TX_BLOCKING, JY61_RESET_TX_TIMEOUT_MS);
     if (result==HAL_OK) {
         /* Discard pre-command software bytes/partial frame. Do NOT alter yaw,
          * and do NOT stop RX DMA. Confirmation requires a new full 0x53. */

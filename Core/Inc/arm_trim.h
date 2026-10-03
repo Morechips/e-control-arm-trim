@@ -20,8 +20,9 @@ typedef enum {
     ARM_TRIM_COMPLETE_ESTIMATED, ARM_TRIM_STOPPING, ARM_TRIM_CANCELLED, ARM_TRIM_FAULT
 } ArmTrimState_t;
 
-/* Foreground callbacks. send transmits exactly three synchronized joints;
- * stop addresses one joint index 0..2. Neither means mechanical completion.
+/* Foreground callbacks. send addresses exactly three synchronized joints;
+ * stop addresses one joint index 0..2. Without the optional async extension,
+ * success means transmission finished synchronously, never mechanical arrival.
  * now must include time spent inside send/stop. No allocation or HAL in core. */
 typedef struct {
     bool (*send)(void *user, const uint16_t positions[3], uint16_t move_ms);
@@ -30,6 +31,20 @@ typedef struct {
     void (*lateral_report)(void *user, float error_mm);
     void *user;
 } ArmTrimIO_t;
+
+typedef enum {
+    ARM_TRIM_TX_PENDING = 0, ARM_TRIM_TX_COMPLETE, ARM_TRIM_TX_FAILED
+} ArmTrimTxState_t;
+
+/* Optional asynchronous extension, using the original IO's user pointer.
+ * A successful send/stop accepts one transfer. COMPLETE reports its actual
+ * hardware start and transmit-complete ticks; PENDING timestamps are ignored.
+ * cancel_pending removes queued motion without aborting an active wire frame.
+ * The canceled transfer must subsequently poll COMPLETE or FAILED. */
+typedef struct {
+    ArmTrimTxState_t (*poll)(void *user, uint32_t *started, uint32_t *completed);
+    void (*cancel_pending)(void *user);
+} ArmTrimAsyncIO_t;
 
 typedef struct {
     ArmKinematicsGeometry_t geometry;
@@ -69,20 +84,25 @@ typedef struct {
 typedef struct {
     ArmTrimConfig_t config;
     ArmTrimIO_t io;
+    ArmTrimAsyncIO_t async_io;
     ArmTrimStatus_t status;
     ArmTrimSegment_t segments[ARM_TRIM_MAX_SEGMENTS];
     ArmElbowBranch_t branch;
-    uint32_t segment_tick, service_tick, dispatch_tick;
+    uint32_t segment_tick, service_tick, dispatch_tick, tx_tick;
     unsigned stop_index;
     bool segment_sent, configured, jog_release_requested;
+    bool tx_pending, stop_waiting;
 } ArmTrim_t;
 
 /* Defaults cover trajectory only; caller supplies geometry and calibration. */
 void ArmTrim_DefaultConfig(ArmTrimConfig_t *config);
 ArmTrimResult_t ArmTrim_Init(ArmTrim_t *trim, const ArmTrimConfig_t *config,
                             const ArmTrimIO_t *io);
+/* Set while idle. NULL restores the original synchronous callback contract. */
+ArmTrimResult_t ArmTrim_SetAsyncIO(ArmTrim_t *trim, const ArmTrimAsyncIO_t *async);
 /* Caller asserts actual arm is at positions, stable, and chassis parked.
- * This only establishes an estimate; it sends no bytes. */
+ * This only establishes an estimate; it sends no bytes. A failed replacement
+ * invalidates the old reference, except when rejected as busy/fault-latched. */
 ArmTrimResult_t ArmTrim_Synchronize(ArmTrim_t *trim, const uint16_t positions[3]);
 ArmTrimResult_t ArmTrim_MoveRelativeX(ArmTrim_t *trim, float dx_mm);
 /* Held-button motion: preflight to the enabled boundary on a timed path.

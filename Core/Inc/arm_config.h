@@ -14,24 +14,20 @@
  * +X toward the object and +Z upward. These are bench measurements rather
  * than nominal CAD dimensions, so later calibration may refine them. */
 #define ARM_LINK_1_MM 104.85f
-/* 001 axis -> 002 axis, operator clarified on 2026-10-02:
- * add the two measurements first, then halve: (82 + 87.5) / 2 = 84.75 mm. */
-#define ARM_LINK_2_MM 84.75f
+#define ARM_LINK_2_MM 88.65f
 #define ARM_BASE_AXIS_HEIGHT_MM 120.0f
 #define ARM_TOOL_REACH_MM 132.0f
 #define ARM_TOOL_X_MM 121.1538f
 #define ARM_TOOL_Z_MM 52.4f
 
-/* Operator-measured joint travel on 2026-10-02. These scalar bounds are
- * NOT collision-free pose or path limits. */
-#define ARM_P0_MIN 915U
-/* Operator requested restoring P1800 on 2026-10-02. Joint travel alone
- * does not prove that the restored pose or its path clears obstacles. */
-#define ARM_P0_MAX 1800U
-#define ARM_P1_MIN 947U
+/* Reinstalled-arm collision-safe scalar ranges. They are conservative joint
+ * bounds, not configuration-dependent PCB collision detection. */
+#define ARM_P0_MIN 902U
+#define ARM_P0_MAX 1569U
+#define ARM_P1_MIN 600U
 #define ARM_P1_MAX 2500U
 #define ARM_P2_MIN 500U
-#define ARM_P2_MAX 1874U
+#define ARM_P2_MAX 2110U
 
 /* Measured after the complete arm was yawed 180 degrees on the chassis.
  * Joint angles remain local to the arm plane: q0=0 is horizontal toward the
@@ -54,8 +50,7 @@
  * This avoids the first button press jumping between the two end positions. */
 #define ARM_REFERENCE_P3 1200U
 #define ARM_GRIPPER_MIN_P 900U
-/* Recorded fully-open task poses use P2192. */
-#define ARM_GRIPPER_MAX_P 2192U
+#define ARM_GRIPPER_MAX_P 1500U
 
 #endif
 

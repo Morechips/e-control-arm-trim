@@ -1,3 +1,5 @@
+param([switch]$DisableArmTrim)
+
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -19,29 +21,31 @@ $includeFlags = @(
 )
 $commonCFlags = @(
     '-std=c11', '-DUSE_HAL_DRIVER', '-DSTM32F407xx',
+    ('-DARM_TRIM_ENABLE=' + [int](-not $DisableArmTrim)),
     '-Os', '-g3', '-ffunction-sections', '-fdata-sections',
     '-Wall', '-Wextra', '-Werror'
 )
 $sources = @(
     'Core/Src/main.c',
-    'Core/Src/board_app.c',
-    'Core/Src/zlis2_driver.c',
-    'Core/Src/arm_control.c',
+    'Core/Src/servo.c',
     'Core/Src/arm_kinematics.c',
     'Core/Src/arm_collision.c',
-    'Core/Src/arm_tuner.c',
     'Core/Src/arm_trim.c',
-    'Core/Src/arm_trim_bluetooth.c',
-    'Core/Src/arm_trim_bench.c',
+    'Core/Src/arm_trim_project.c',
+    'Core/Src/arm_trim_service.c',
+    'Core/Src/arm_trim_input.c',
+    'Core/Src/board_inputs.c',
+    'Core/Src/board_app.c',
+    'Core/Src/start_button.c',
     'Core/Src/vision_data.c',
     'Core/Src/maxicam.c',
-    'Core/Src/servo_pose.c',
-    'Core/Src/servo_remote.c',
     'Core/Src/laser.c',
     'Core/Src/turn_right.c',
     'Core/Src/action_fsm.c',
     'Core/Src/mission_fsm.c',
     'Core/Src/route_fsm.c',
+    'Core/Src/uart_driver.c',
+    'Core/Src/uart_tx_queue.c',
     'Core/Src/serial_io.c',
     'Core/Src/bluetooth_driver.c',
     'Core/Src/motor_driver.c',
@@ -49,7 +53,7 @@ $sources = @(
     'Core/Src/mecanum.c',
     'Core/Src/mecanum_test.c',
     'Core/Src/car_control.c',
-    'Core/Src/x42.c',
+    'Core/Src/remote_heading.c',
     'Core/Src/uart_bridge.c',
     'Core/Src/usart2_dma.c',
     'Core/Src/jy61.c',
@@ -107,6 +111,31 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'BIN generation failed' }
     & $sizeTool $elf
     if ($LASTEXITCODE -ne 0) { throw 'Size report failed' }
+    # Record the actual input bytes, independent of uncommitted branch state.
+    $trimBuildInputs = @($sources + $assemblySource + 'STM32F407_FLASH.ld' + 'scripts/build_firmware.ps1')
+    $trimBuildInputs += @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'Core\Inc') -Filter '*.h' -File |
+        ForEach-Object { 'Core/Inc/' + $_.Name })
+    $trimBuildInputs += @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'Drivers') -Filter '*.h' -File -Recurse |
+        ForEach-Object { $_.FullName.Substring($projectRoot.Length + 1).Replace('\', '/') })
+    $trimBuildInputHashes = [ordered]@{}
+    foreach ($trimBuildInput in ($trimBuildInputs | Sort-Object -Unique)) {
+        $trimBuildInputHashes[$trimBuildInput] = (Get-FileHash -LiteralPath (Join-Path $projectRoot $trimBuildInput) -Algorithm SHA256).Hash
+    }
+    $trimBuildManifest = [ordered]@{
+        version = 'v4.6-servo-integration'
+        built_utc = [DateTime]::UtcNow.ToString('o')
+        arm_trim_enabled = (-not $DisableArmTrim)
+        compiler = (& $compiler --version | Select-Object -First 1)
+        c_flags = @($mcuFlags + $commonCFlags + $includeFlags)
+        firmware_sha256 = [ordered]@{
+            elf = (Get-FileHash -LiteralPath $elf -Algorithm SHA256).Hash
+            hex = (Get-FileHash -LiteralPath $hex -Algorithm SHA256).Hash
+            bin = (Get-FileHash -LiteralPath $bin -Algorithm SHA256).Hash
+        }
+        source_sha256 = $trimBuildInputHashes
+    }
+    $trimBuildManifest | ConvertTo-Json -Depth 5 |
+        Set-Content -LiteralPath (Join-Path $outputDirectory 'arm-trim-v4.6-manifest.json') -Encoding UTF8
     Write-Output "ELF: $elf"
     Write-Output "HEX: $hex"
     Write-Output "BIN: $bin"

@@ -19,6 +19,7 @@ static float leg_initial_remaining;
 static int8_t turn_direction, motion_direction;
 static int16_t requested_rpm;
 static uint8_t correction_count, slow_requested;
+static bool reset_after_turn;
 
 static int16_t ApproachRPM(void)
 {
@@ -103,7 +104,7 @@ static void Fail(TurnRightError_t error)
     LogReceiveStats(HAL_GetTick());
 }
 
-static HAL_StatusTypeDef StartTurn(int16_t rpm, float degrees, int8_t direction)
+static HAL_StatusTypeDef StartTurn(int16_t rpm, float degrees, int8_t direction, bool reset)
 {
     const JY61_Data *data = JY61_GetData();
     HAL_StatusTypeDef result;
@@ -125,6 +126,7 @@ static HAL_StatusTypeDef StartTurn(int16_t rpm, float degrees, int8_t direction)
         Debug_Log("[TURN] REJECT motor_command\r\n");
     if (result != HAL_OK) return result;
     previous_yaw = data->yaw;
+    reset_after_turn = reset;
     yaw_sequence = data->yaw_sequence;
     requested_degrees = degrees;
     requested_rpm = rpm;
@@ -155,9 +157,15 @@ static HAL_StatusTypeDef StartTurn(int16_t rpm, float degrees, int8_t direction)
     return HAL_OK;
 }
 
-HAL_StatusTypeDef right90(int16_t rpm) { return StartTurn(rpm, TURN_RIGHT_TARGET_DEG, 1); }
-HAL_StatusTypeDef right180(int16_t rpm) { return StartTurn(rpm, 180.0f, 1); }
-HAL_StatusTypeDef left90(int16_t rpm) { return StartTurn(rpm, TURN_RIGHT_TARGET_DEG, -1); }
+HAL_StatusTypeDef right90(int16_t rpm) { return StartTurn(rpm, TURN_RIGHT_TARGET_DEG, 1, true); }
+HAL_StatusTypeDef right180(int16_t rpm) { return StartTurn(rpm, 180.0f, 1, true); }
+HAL_StatusTypeDef left90(int16_t rpm) { return StartTurn(rpm, TURN_RIGHT_TARGET_DEG, -1, true); }
+HAL_StatusTypeDef TurnRight_StartRemote(int16_t degrees, int16_t rpm)
+{
+    if (degrees != -90 && degrees != 90 && degrees != 180) return HAL_ERROR;
+    return StartTurn(rpm, degrees < 0 ? (float)-degrees : (float)degrees,
+                     degrees < 0 ? -1 : 1, false);
+}
 
 void TurnRight_Cancel(void)
 {
@@ -339,6 +347,7 @@ void TurnRight_Process(bool motion_allowed)
         if (fabsf(error) <= TURN_TOLERANCE_DEG)
         {
             LogReceiveStats(now);
+            if (!reset_after_turn) { status.state = TURN_RIGHT_DONE; return; }
             yaw_sequence = data->yaw_sequence;
             if (JY61_ResetHeading() != HAL_OK) { Fail(TURN_RIGHT_RESET_ERROR); return; }
             phase_ms = HAL_GetTick();

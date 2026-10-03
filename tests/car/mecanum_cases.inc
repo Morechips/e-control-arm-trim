@@ -125,12 +125,11 @@ static void TestMecanumSafety(void)
     Step(30);assert(Count(0xFE)==4);
     RequestTest(MEC_RIGHT);assert(mecanum_test_active);Step(30);
     Frame(1,0,500,500);assert(Car_Control_GetState()==CAR_BRAKE_LOCK && !mecanum_test_active);
-    Step(30);before=Count(0xF6);Frame(0,0,500,500);RequestTest(MEC_FORWARD);Step(30);
-    assert(Car_Control_GetState()==CAR_BRAKE_LOCK && Count(0xF6)==before);
-    Frame(0,0,50,-50);Step(30);assert(Car_Control_GetState()==CAR_READY && !mecanum_test_active);
-    assert(Count(0xF6)==before);
+    Step(30);before=Count(0xF6);Frame(0,0,500,500);Step(30);
+    assert(Car_Control_GetState()==CAR_READY && Count(0xF6)==before);
     RequestTest(MEC_FORWARD_RIGHT);Step(30);Frame(0,0,51,0);Step(30);
-    assert(!mecanum_test_active); /* Leaving center cancels, no joystick drive in test build. */
+    assert(mecanum_test_active); /* JOY cannot cancel or trigger a diagnostic move. */
+    RequestTest(MEC_STOP);Step(30);
     Frame(0,0,0,0);RequestTest(MEC_LEFT);Step(30);
     Frame(1,1,0,0);Step(40);assert(Car_Control_GetState()==CAR_OFF && !mecanum_test_active);
     assert(Count(0xF3)==4); /* Test cancellation must preserve queued disable frames. */

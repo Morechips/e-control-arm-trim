@@ -1,7 +1,6 @@
-# Generated builds and local fallback firmware
 /build/
-/firmware_direct/
-/rollback_*/
+/build-local/
+/cmake-build-*/
 /MDK-ARM/Objects/
 /MDK-ARM/Listings/
 /MDK-ARM/*.uvguix.*
@@ -9,6 +8,8 @@
 /MDK-ARM/*.bak
 /MDK-ARM/build.log
 /petg_robot_arm_v1/
+/firmware_direct/
+/rollback_*/
 __pycache__/
 *.pyc
 *.o
@@ -19,7 +20,6 @@ __pycache__/
 *.exe
 *.log
 *.zip
-# Local captures and credentials
-/hardware-*.json
 /.env
 /.env.*
+/hardware-*.json

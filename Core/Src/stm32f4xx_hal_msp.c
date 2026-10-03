@@ -48,13 +48,15 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
     {
         __HAL_RCC_USART3_CLK_ENABLE();
         __HAL_RCC_GPIOB_CLK_ENABLE();
-        /* Dedicated ZL-IS2 port: PB10 TX, PB11 RX. No IRQ or DMA. */
+        /* Dedicated ZL-IS2 port: PB10 TX, PB11 RX, interrupt TX. */
         gpio.Pin = GPIO_PIN_10 | GPIO_PIN_11;
         gpio.Mode = GPIO_MODE_AF_PP;
         gpio.Pull = GPIO_PULLUP;
         gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
         gpio.Alternate = GPIO_AF7_USART3;
         HAL_GPIO_Init(GPIOB, &gpio);
+        HAL_NVIC_SetPriority(USART3_IRQn, 3U, 0U);
+        HAL_NVIC_EnableIRQ(USART3_IRQn);
     }
     else if (huart->Instance == UART4)
     {

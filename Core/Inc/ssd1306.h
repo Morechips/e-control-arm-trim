@@ -5,6 +5,9 @@
 
 #define SSD1306_WIDTH 128U
 #define SSD1306_HEIGHT 64U
+#ifndef SSD1306_INIT_TIMEOUT_MS
+#define SSD1306_INIT_TIMEOUT_MS 50U
+#endif
 #ifndef SSD1306_I2C_ADDRESS
 #define SSD1306_I2C_ADDRESS 0x3CU /* Seven-bit address; shifted only in the driver. */
 #endif

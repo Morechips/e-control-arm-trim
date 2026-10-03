@@ -34,6 +34,5 @@ ArmCollisionResult_t ArmCollision_CheckPose(const ArmCollisionModel_t *model,
 ArmCollisionResult_t ArmCollision_CheckEdge(const ArmCollisionModel_t *model,
     const ArmKinematicsGeometry_t *geometry, const ArmJointAngles_t *from,
     const ArmJointAngles_t *to);
-void ArmCollision_ProjectModel(ArmCollisionModel_t *model);
 
 #endif

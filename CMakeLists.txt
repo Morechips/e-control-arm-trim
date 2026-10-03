@@ -14,24 +14,25 @@ set(MCU_FLAGS -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard)
 
 add_executable(${PROJECT_NAME}
     Core/Src/main.c
-    Core/Src/board_app.c
-    Core/Src/zlis2_driver.c
-    Core/Src/arm_control.c
+    Core/Src/servo.c
     Core/Src/arm_kinematics.c
     Core/Src/arm_collision.c
-    Core/Src/arm_tuner.c
     Core/Src/arm_trim.c
-    Core/Src/arm_trim_bluetooth.c
-    Core/Src/arm_trim_bench.c
+    Core/Src/arm_trim_project.c
+    Core/Src/arm_trim_service.c
+    Core/Src/arm_trim_input.c
+    Core/Src/board_inputs.c
+    Core/Src/board_app.c
+    Core/Src/start_button.c
     Core/Src/vision_data.c
     Core/Src/maxicam.c
-    Core/Src/servo_pose.c
-    Core/Src/servo_remote.c
     Core/Src/laser.c
     Core/Src/turn_right.c
     Core/Src/action_fsm.c
     Core/Src/mission_fsm.c
     Core/Src/route_fsm.c
+    Core/Src/uart_driver.c
+    Core/Src/uart_tx_queue.c
     Core/Src/serial_io.c
     Core/Src/bluetooth_driver.c
     Core/Src/motor_driver.c
@@ -39,7 +40,7 @@ add_executable(${PROJECT_NAME}
     Core/Src/mecanum.c
     Core/Src/mecanum_test.c
     Core/Src/car_control.c
-    Core/Src/x42.c
+    Core/Src/remote_heading.c
     Core/Src/uart_bridge.c
     Core/Src/usart2_dma.c
     Core/Src/jy61.c
@@ -63,13 +64,24 @@ add_executable(${PROJECT_NAME}
     ${HAL_DIR}/Src/stm32f4xx_hal_uart.c)
 set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX ".elf")
 target_compile_definitions(${PROJECT_NAME} PRIVATE USE_HAL_DRIVER STM32F407xx)
+option(ARM_TRIM_ENABLE "Enable the independent arm trim service and phone page" ON)
+if(ARM_TRIM_ENABLE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE ARM_TRIM_ENABLE=1)
+endif()
 set(USART2_RX_PERIOD_MS "5" CACHE STRING "JY61 DMA poll period in milliseconds (5 or 2)")
 if(NOT USART2_RX_PERIOD_MS STREQUAL "5" AND NOT USART2_RX_PERIOD_MS STREQUAL "2")
     message(FATAL_ERROR "USART2_RX_PERIOD_MS must be 5 or 2")
 endif()
 target_compile_definitions(${PROJECT_NAME} PRIVATE USART2_RX_PERIOD_MS=${USART2_RX_PERIOD_MS}U)
+option(CAR_TEST_INPUTS_ENABLE "Compile bench-only physical inputs" OFF)
+if(CAR_TEST_INPUTS_ENABLE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE CAR_TEST_INPUTS_ENABLE=1)
+endif()
 option(CAR_MECANUM_TEST_MODE "Enable gated 30 RPM, 1 second mecanum direction tests" OFF)
 option(CAR_HEADING_TEST_MODE "Enable low-speed heading test mailbox" OFF)
+if((CAR_HEADING_TEST_MODE OR CAR_MECANUM_TEST_MODE) AND NOT CAR_TEST_INPUTS_ENABLE)
+    message(FATAL_ERROR "Car test modes require CAR_TEST_INPUTS_ENABLE=ON")
+endif()
 if(CAR_HEADING_TEST_MODE AND CAR_MECANUM_TEST_MODE)
     message(FATAL_ERROR "Select either heading or mecanum direction tests")
 endif()
