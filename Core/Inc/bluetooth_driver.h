@@ -18,6 +18,10 @@
  * pose button; SHOT shares the shooting request with the older Shot short. */
 #define BT_CONTROL_BOOL_SHOT_BIT (1U << 9)
 #define BT_CONTROL_BOOL_AIM_BIT (1U << 10)
+#define BT_CONTROL_BOOL_JOG_BIT (1U << 12)
+#define BT_CONTROL_BOOL_CLOSE_BIT (1U << 13)
+#define BT_CONTROL_BOOL_OPEN_BIT (1U << 14)
+#define BT_CONTROL_BOOL_ARM_STOP_BIT (1U << 15)
 /* Independent reference button: A5 31 00 31 5A on press, A5 30 00 30 5A
  * on release. These do not refresh chassis control or Bluetooth keepalive.
  * With ARM_TRIM_ENABLE=1, five-byte PID/reference commands wait for the next
@@ -45,7 +49,10 @@
 /* (20).pro: two bool bytes, then 16 shorts: JOY_Y, forward, backward,
  * stop, strafe_left, strafe_right, right_90, right_180, Cam_T, Shot,
  * LEFT_90, servo_mode, joy_x, armcmd, armx, army. GAP is at 35..38,
- * checksum at 39, tail at 40. Legacy arm fields are validated but inactive. */
+ * checksum at 39, tail at 40. With ARM_TRIM_ENABLE=1, bools 12..15 are
+ * WT/CLOSE/OPEN/ARM_STOP; short11 is ARM_STATUS and short14 is ydnum direction.
+ * short13 is PID_CMD (0..11), short15=1 is REFERENCE. Existing legacy
+ * armcmd/army values still parse but have no action outside these commands. */
 typedef enum {
     BT_DIRECTION_NONE = 0,
     BT_DIRECTION_FORWARD = 10,
@@ -90,6 +97,9 @@ typedef struct {
     uint16_t servo_buttons;
     uint8_t aim;
     uint16_t gap_pwm;
+    uint8_t trim_buttons;
+    int16_t trim_direction;
+    uint8_t pid_command, reference_pressed;
     int16_t brake;
     int16_t disable;
 } BluetoothControlFrame;

@@ -85,7 +85,8 @@
 #define ARM_TRIM_PROJECT_P0_MAX 1800U
 #endif
 #ifndef ARM_TRIM_PROJECT_P1_MIN
-#define ARM_TRIM_PROJECT_P1_MIN 947U
+/* Operator requested AIM's P821 as the unified service lower bound. */
+#define ARM_TRIM_PROJECT_P1_MIN 821U
 #endif
 #ifndef ARM_TRIM_PROJECT_P1_MAX
 #define ARM_TRIM_PROJECT_P1_MAX 2500U

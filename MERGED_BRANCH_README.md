@@ -1,4 +1,8 @@
+> 本页保留765a35c上一合并版的历史说明；当前v4.7请从[README](README.md)、[版本差异](V4_7_CHANGES.md)及[交接文档](V4_7_HANDOFF.md)开始。旧双入口、会话切页和部分003行为已由统一服务规则取代。
+
 # 整车与机械臂合并版分支
+
+> 本文记录已推送v4.6合并分支。当前目录是尚未推送的v4.7统一控制实现，见 [UNIFIED_MODULE_INTEGRATION.md](UNIFIED_MODULE_INTEGRATION.md) 及 [UNIFIED_CONTROL_GUIDE.md](UNIFIED_CONTROL_GUIDE.md)。
 
 本分支：`feature/merged-team-arm-20261003`。
 

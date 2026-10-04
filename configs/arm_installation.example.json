@@ -26,7 +26,7 @@
     },
     {
       "id": 1,
-      "min_pwm": 947,
+      "min_pwm": 821,
       "max_pwm": 2500,
       "calibration": [
         {

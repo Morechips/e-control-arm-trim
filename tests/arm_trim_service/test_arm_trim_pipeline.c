@@ -286,6 +286,24 @@ static void TestLateIRQCompletion(void)
     Finish();
     CHECK(!ArmTrimService_OwnsMotion() && ArmTrimService_GetStatus().state == ARM_TRIM_SERVICE_IDLE);
 }
+static void TestEveryFixedPoseIsPlanar(void)
+{
+    for (unsigned preset = 0U; preset < (unsigned)ServoCode_MAX; ++preset) {
+        Init();
+        CHECK(ArmTrimService_RunPreset((ServoCode)preset) == ARM_TRIM_OK);
+        CHECK(calls == 1U && strstr(history[0], "#000P") != NULL);
+        CHECK(strstr(history[0], "#001P") != NULL && strstr(history[0], "#002P") != NULL);
+        CHECK(strstr(history[0], "#003") == NULL);
+        if (preset == (unsigned)TakeHostage_Catch)
+            CHECK(strstr(history[0], "#001P2136") != NULL);
+        if (preset == (unsigned)Servo_AIM)
+            CHECK(strcmp(history[0], "{#000P1058T2000!#001P0821T2000!#002P0554T2000!}") == 0);
+        Finish();
+        CHECK(ArmTrimService_GetStatus().state != ARM_TRIM_SERVICE_FAULT);
+        CHECK(ArmTrimService_End() == ARM_TRIM_OK); Finish();
+    }
+}
+
 int main(void)
 {
     TestCompletedWaitAndGrip();
@@ -293,6 +311,7 @@ int main(void)
     TestCoreCancelAndGripCancel();
     TestTimeoutAndRefusedAbort();
     TestLateIRQCompletion();
+    TestEveryFixedPoseIsPlanar();
     printf("Arm trim actual Servo/UART pipeline: %u checks passed\n", checks);
     return 0;
 }

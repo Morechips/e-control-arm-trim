@@ -17,6 +17,9 @@ static uint8_t trim_buttons, pid_command;
 static int16_t trim_direction;
 static uint32_t trim_arrival;
 static unsigned line_count;
+static unsigned combined_count;
+static ServoCode combined_preset;
+static unsigned combined_requests;
 static char trim_line[80];
 #define CHECK(c) do { ++checks; assert(c); } while (0)
 
@@ -29,6 +32,14 @@ void Car_Control_SubmitRemoteInput(const CarRemoteInput_t *input)
 void Car_Control_InvalidateRemoteInput(void) { ++car_invalidations; }
 void ArmTrimInput_Submit(uint8_t buttons, int16_t direction, uint32_t arrival_tick)
 { trim_buttons = buttons; trim_direction = direction; trim_arrival = arrival_tick; ++trim_count; }
+void ArmTrimInput_SubmitCombined(uint8_t buttons, int16_t direction,
+                                 ServoCode preset, uint16_t gap_pwm,
+                                 unsigned requests, uint32_t arrival_tick)
+{
+    (void)gap_pwm;
+    trim_buttons = buttons; trim_direction = direction; trim_arrival = arrival_tick;
+    combined_preset = preset; combined_requests = requests; ++combined_count;
+}
 void ArmTrimInput_Invalidate(void) { ++trim_invalidations; }
 void ArmTrimInput_HandleLine(const char *line, uint32_t arrival_tick)
 { CHECK(strlen(line) < sizeof(trim_line)); strcpy(trim_line, line); trim_arrival = arrival_tick; ++line_count; }
@@ -52,6 +63,7 @@ static void Reset(void)
     now += 2000U;
     Bluetooth_Init();
     trim_count = trim_invalidations = car_count = car_invalidations = pid_count = line_count = 0U;
+    combined_count = 0U;
 }
 static void Packet(uint8_t p[7], uint8_t buttons, uint8_t marker, int16_t direction)
 {
@@ -221,6 +233,52 @@ int main(void)
         Packet(p, ARM_TRIM_BUTTON_JOG, 0U, 30); Feed(p, 7U); Bluetooth_Process();
         CHECK(car_count == 40U && Bluetooth_GetLastRxTick() == car_tick);
         now += 101U; CHECK(!Bluetooth_IsConnected());
+    }
+    /* All sixteen bools fit the same two bytes. Every split must keep the
+     * unified frame distinct from short/legacy packets, including bit15. */
+    {
+        uint8_t phone[41]; int16_t shorts[16] = {0};
+        shorts[11] = 1; shorts[13] = 5; shorts[14] = -30;
+        for (unsigned bit = 0U; bit < 16U; ++bit)
+            for (unsigned split = 1U; split < sizeof(phone); ++split) {
+                Reset(); PackPhone20(phone, shorts, (uint16_t)(1U << bit), 0U);
+                Feed(phone, split); Bluetooth_Process(); CHECK(car_count == 0U);
+                Feed(phone + split, sizeof(phone) - split); Bluetooth_Process();
+                CHECK(car_count == 1U && trim_count == 0U && Bluetooth_GetSequence() == 1U);
+                Bluetooth_DispatchServoActions(0U);
+                CHECK(combined_count == 1U && trim_direction == -30 && pid_count == 1U);
+                CHECK((trim_buttons & ARM_TRIM_BUTTON_STATUS) != 0U);
+                if (bit == 12U) CHECK((trim_buttons & ARM_TRIM_BUTTON_JOG) != 0U);
+                if (bit == 13U) CHECK((trim_buttons & ARM_TRIM_BUTTON_CLOSE) != 0U);
+                if (bit == 14U) CHECK((trim_buttons & ARM_TRIM_BUTTON_OPEN) != 0U);
+                if (bit == 15U) CHECK((trim_buttons & ARM_TRIM_BUTTON_STOP) != 0U);
+                Feed(phone, sizeof(phone)); Bluetooth_Process(); Bluetooth_DispatchServoActions(0U);
+                CHECK(combined_requests == 0U && pid_count == 1U);
+            }
+        Reset(); memset(shorts, 0, sizeof(shorts)); shorts[15] = 1;
+        PackPhone20(phone, shorts, 0U, 0U);
+        Feed(phone, sizeof(phone)); Bluetooth_Process(); Bluetooth_DispatchServoActions(0U);
+        CHECK(combined_preset == Servo_REFERENCE && combined_requests == 1U);
+    }
+    /* Switching to any shorter chassis schema clears unified-only fields.
+     * Old neutral packets cannot renew held WT or repeat PID/reference. */
+    {
+        const unsigned lengths[] = {21U, 23U, 25U, 27U, 29U, 31U, 35U};
+        uint8_t phone[41], legacy[35]; int16_t shorts[16] = {0};
+        shorts[11] = 1; shorts[13] = 9; shorts[14] = -1; shorts[15] = 1;
+        for (unsigned i = 0U; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
+            Reset(); PackPhone20(phone, shorts, BT_CONTROL_BOOL_JOG_BIT, 0U);
+            Feed(phone, sizeof(phone)); Bluetooth_Process(); Bluetooth_DispatchServoActions(0U);
+            CHECK(trim_buttons != 0U && trim_direction == -1 && pid_count == 1U);
+            memset(legacy, 0, sizeof(legacy));
+            legacy[0] = 0xA5U; legacy[lengths[i] - 1U] = 0x5AU;
+            Feed(legacy, lengths[i]); Bluetooth_Process(); Bluetooth_DispatchServoActions(0U);
+            CHECK(car_count == 2U && combined_count == 2U);
+            CHECK(trim_buttons == 0U && trim_direction == 0 && pid_count == 1U);
+            CHECK(combined_preset == ServoCode_NONE && combined_requests == 0U);
+            const BluetoothControlFrame *decoded = &Bluetooth_GetControl()->frame;
+            CHECK(decoded->pid_command == 0U && decoded->reference_pressed == 0U);
+        }
     }
     /* RX errors and overflow signal an ISR-safe invalidation immediately. */
     {

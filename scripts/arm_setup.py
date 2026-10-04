@@ -38,7 +38,7 @@ def current_example():
         "joints": [
             {"id": 0, "min_pwm": 915, "max_pwm": 1800,
              "calibration": [{"pwm": 989, "angle_deg": 0.0}, {"pwm": 1309, "angle_deg": 45.0}]},
-            {"id": 1, "min_pwm": 947, "max_pwm": 2500,
+            {"id": 1, "min_pwm": 821, "max_pwm": 2500,
              "calibration": [{"pwm": 1687, "angle_deg": 0.0}, {"pwm": 2344, "angle_deg": -90.0}]},
             {"id": 2, "min_pwm": 500, "max_pwm": 1874,
              "calibration": [{"pwm": 1232, "angle_deg": 0.0}, {"pwm": 571, "angle_deg": -90.0}]}],

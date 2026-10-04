@@ -50,12 +50,13 @@ int main(void)
         Car_Control_Process(); /* React to motor reply/transport faults this loop. */
         PID_Tuner_Process();
 #if ARM_TRIM_ENABLE
+        Bluetooth_DispatchServoActions(BoardInputs_TakeServoAimPress());
         /* Interlocks cancel pending arm motion before service TX dispatch. */
         ArmTrimInput_Process();
 #else
         Servo_Process();
-#endif
         Bluetooth_DispatchServoActions(BoardInputs_TakeServoAimPress());
+#endif
         if (!CAR_USART2_U1_BRIDGE) Debug_Process();
         Board_Process();
     }

@@ -316,7 +316,7 @@ static void TestReplacementReference(void)
     ArmTrimProject_DefaultConfig(&project);
     CHECK(fabsf(project.geometry.link_2_mm - 84.75f) < 0.001f);
     CHECK(project.calibration[0].min_position == 915U && project.calibration[0].max_position == 1800U);
-    CHECK(project.calibration[1].min_position == 947U && project.calibration[2].max_position == 1874U);
+    CHECK(project.calibration[1].min_position == 821U && project.calibration[2].max_position == 1874U);
     CHECK(project.collision.enabled && project.enabled_min_mm == -75.0f && project.enabled_max_mm == 75.0f);
     Init(true);
     CHECK(ArmTrim_Synchronize(&trim, good) == ARM_TRIM_OK);

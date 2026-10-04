@@ -1,5 +1,7 @@
 # 蓝牙控制器完整配置与操作指引
 
+> 本文为v4.6历史配置。当前目录的v4.7统一41字节页面、所有固定姿态不带003及自动切换行为，请使用 [UNIFIED_CONTROL_GUIDE.md](UNIFIED_CONTROL_GUIDE.md)。
+
 适用目录：`D:\工科大\e-control-arm-trim-latest-20261003`。2026-10-03 从队友仓库 `gpnu-in-jnds/e-control` 的 `main` 拉取，基线提交 `e7404c592df92c7c5e7a9d09562e302ebf52e2b3`，已接入模块化机械臂。本文按本目录实际固件整理。
 
 ## 1. 先选择控制页面

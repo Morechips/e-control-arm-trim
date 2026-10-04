@@ -124,7 +124,10 @@ try {
         $trimBuildInputHashes[$trimBuildInput] = (Get-FileHash -LiteralPath (Join-Path $projectRoot $trimBuildInput) -Algorithm SHA256).Hash
     }
     $trimBuildManifest = [ordered]@{
-        version = 'v4.6-team-main-20261003'
+        version = 'v4.7-unified-20261003'
+        runtime_mode = $(if ($DisableArmTrim) { 'team_legacy_dispatch' } else { 'unified_car_arm' })
+        unified_phone_bytes = $(if ($DisableArmTrim) { $null } else { 41 })
+        planar_only_fixed_poses = (-not $DisableArmTrim)
         upstream_repository = 'https://github.com/gpnu-in-jnds/e-control'
         upstream_base_commit = 'e7404c592df92c7c5e7a9d09562e302ebf52e2b3'
         built_utc = [DateTime]::UtcNow.ToString('o')

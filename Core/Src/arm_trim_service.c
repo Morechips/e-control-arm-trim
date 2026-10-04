@@ -15,6 +15,9 @@ typedef struct {
     uint8_t stop_mask;
     bool configured, owns, synchronize_profile, ending;
     bool completed, stop_waiting, stop_failed, fault_latched;
+    bool pose_pending, pending_synchronize, pending_fixed, jog_motion;
+    ArmTrimServiceProfile_t pending_profile;
+    uint16_t fixed_positions[3], pending_positions[3];
 } Service_t;
 
 static Service_t service;
@@ -80,7 +83,8 @@ static bool Busy(void)
     return service.state == ARM_TRIM_SERVICE_PROFILE ||
            service.state == ARM_TRIM_SERVICE_MOTION ||
            service.state == ARM_TRIM_SERVICE_GRIP ||
-           service.state == ARM_TRIM_SERVICE_STOPPING || service.ending;
+           service.state == ARM_TRIM_SERVICE_FIXED ||
+           service.state == ARM_TRIM_SERVICE_STOPPING || service.ending || service.pose_pending;
 }
 
 static bool Release(void)
@@ -130,6 +134,7 @@ static void Invalidate(void)
 
 static void StartStops(uint8_t mask, ArmTrimResult_t error)
 {
+    service.pose_pending = service.jog_motion = false;
     CancelPending(&service);
     Invalidate();
     service.state = ARM_TRIM_SERVICE_STOPPING;
@@ -181,21 +186,20 @@ ArmTrimResult_t ArmTrimService_Init(const ArmTrimServiceConfig_t *config,
     service.configured = true;
     service.owns = service.ending = service.completed = false;
     service.stop_waiting = service.stop_failed = service.fault_latched = false;
+    service.pose_pending = service.jog_motion = false;
     service.transport_result = SERVO_OK;
     return Result(ARM_TRIM_OK);
 }
 
-ArmTrimResult_t ArmTrimService_ReadyProfile(ArmTrimServiceProfile_t profile,
-                                         bool synchronize)
+static ArmTrimResult_t DispatchPose(const uint16_t positions[3],
+                                   ArmTrimServiceProfile_t profile,
+                                   bool synchronize, bool fixed)
 {
-    ArmTrimResult_t result = Available();
-    if (result != ARM_TRIM_OK) return Result(result);
-    if ((unsigned)profile >= ARM_TRIM_PROFILE_COUNT) return Result(ARM_TRIM_INVALID);
-    result = Acquire();
+    ArmTrimResult_t result = Acquire();
     if (result != ARM_TRIM_OK) return Result(result);
     Invalidate();
     service.operation_tick = Now(&service);
-    result = FromServo(Servo_SetValuesOwned(&service, service.config.references[profile],
+    result = FromServo(Servo_SetValuesOwned(&service, positions,
                                          3U, service.config.profile_move_ms));
     if (result != ARM_TRIM_OK) {
         (void)Release();
@@ -203,10 +207,68 @@ ArmTrimResult_t ArmTrimService_ReadyProfile(ArmTrimServiceProfile_t profile,
         return Result(result);
     }
     service.profile = profile;
+    memcpy(service.fixed_positions, positions, sizeof(service.fixed_positions));
     service.synchronize_profile = synchronize;
     service.completed = false;
-    service.state = ARM_TRIM_SERVICE_PROFILE;
+    service.state = fixed ? ARM_TRIM_SERVICE_FIXED : ARM_TRIM_SERVICE_PROFILE;
     return Result(ARM_TRIM_OK);
+}
+
+static ArmTrimResult_t RequestPose(const uint16_t positions[3],
+                                  ArmTrimServiceProfile_t profile,
+                                  bool synchronize, bool fixed)
+{
+    ArmTrimResult_t result;
+    unsigned joint;
+    ArmTrimStatus_t core = ArmTrim_GetStatus(&service.trim);
+    if (!service.configured) return Result(ARM_TRIM_INVALID);
+    if (service.fault_latched) return Result(ARM_TRIM_FAULT_LATCHED);
+    for (joint = 0U; joint < 3U; ++joint)
+        if (positions[joint] < service.config.core.calibration[joint].min_position ||
+            positions[joint] > service.config.core.calibration[joint].max_position)
+            return Result(ARM_TRIM_OUT_OF_RANGE);
+    if (service.state == ARM_TRIM_SERVICE_MOTION && service.jog_motion &&
+        core.reference_valid &&
+        (core.state == ARM_TRIM_MOVING || core.state == ARM_TRIM_SETTLING) &&
+        !service.pose_pending && !service.ending) {
+        result = ArmTrim_ReleaseJog(&service.trim);
+        if (result != ARM_TRIM_OK) return Result(result);
+        memcpy(service.pending_positions, positions, sizeof(service.pending_positions));
+        service.pending_profile = profile;
+        service.pending_synchronize = synchronize;
+        service.pending_fixed = fixed;
+        service.pose_pending = true;
+        return Result(ARM_TRIM_OK);
+    }
+    result = Available();
+    if (result != ARM_TRIM_OK) return Result(result);
+    return DispatchPose(positions, profile, synchronize, fixed);
+}
+
+ArmTrimResult_t ArmTrimService_ReadyProfile(ArmTrimServiceProfile_t profile,
+                                         bool synchronize)
+{
+    if ((unsigned)profile >= ARM_TRIM_PROFILE_COUNT) return Result(ARM_TRIM_INVALID);
+    return RequestPose(service.config.references[profile], profile, synchronize, false);
+}
+
+ArmTrimResult_t ArmTrimService_RunPreset(ServoCode preset)
+{
+    uint16_t positions[3];
+    unsigned joint;
+    if ((unsigned)preset >= (unsigned)ServoCode_MAX) return Result(ARM_TRIM_INVALID);
+    if (preset == TakeBall_Mid)
+        return ArmTrimService_ReadyProfile(ARM_TRIM_PROFILE_BALL, true);
+    if (preset == TakeHostage_Catch || preset == TakeHostage_PreGrab)
+        return ArmTrimService_ReadyProfile(ARM_TRIM_PROFILE_HOSTAGE, true);
+    if (preset == BarrelDown_Up)
+        return ArmTrimService_ReadyProfile(ARM_TRIM_PROFILE_BUCKET, true);
+    for (joint = 0U; joint < 3U; ++joint) {
+        if (servo_code_counts[preset] < 3U || codes[preset][joint].id != joint)
+            return Result(ARM_TRIM_INVALID);
+        positions[joint] = codes[preset][joint].pwm;
+    }
+    return RequestPose(positions, ARM_TRIM_PROFILE_NONE, true, true);
 }
 
 ArmTrimResult_t ArmTrimService_Begin(const uint16_t positions[3], bool parked_stable)
@@ -242,6 +304,7 @@ ArmTrimResult_t ArmTrimService_MoveRelativeX(float dx_mm)
     if (result == ARM_TRIM_OK) result = ArmTrim_MoveRelativeX(&service.trim, dx_mm);
     if (result == ARM_TRIM_OK && ArmTrim_GetStatus(&service.trim).state == ARM_TRIM_MOVING)
         service.state = ARM_TRIM_SERVICE_MOTION;
+    if (result == ARM_TRIM_OK) service.jog_motion = false;
     return Result(result);
 }
 
@@ -249,7 +312,10 @@ ArmTrimResult_t ArmTrimService_StartJog(int direction)
 {
     ArmTrimResult_t result = ReferenceAvailable();
     if (result == ARM_TRIM_OK) result = ArmTrim_StartJog(&service.trim, direction);
-    if (result == ARM_TRIM_OK) service.state = ARM_TRIM_SERVICE_MOTION;
+    if (result == ARM_TRIM_OK) {
+        service.state = ARM_TRIM_SERVICE_MOTION;
+        service.jog_motion = true;
+    }
     return Result(result);
 }
 
@@ -263,14 +329,19 @@ ArmTrimResult_t ArmTrimService_ReleaseJog(void)
 
 ArmTrimResult_t ArmTrimService_Grip(uint16_t pwm)
 {
-    ArmTrimResult_t result = ReferenceAvailable();
+    ArmTrimResult_t result = Available();
     ServoCommand_t command = {3U, pwm, service.config.grip_move_ms};
     if (result != ARM_TRIM_OK) return Result(result);
     if (pwm < service.config.grip_min_pwm || pwm > service.config.grip_max_pwm)
         return Result(ARM_TRIM_INVALID);
+    result = Acquire();
+    if (result != ARM_TRIM_OK) return Result(result);
     service.operation_tick = Now(&service);
     result = FromServo(Servo_SetCommandsOwned(&service, &command, 1U));
-    if (result != ARM_TRIM_OK) return Result(result);
+    if (result != ARM_TRIM_OK) {
+        if (!ArmTrim_GetStatus(&service.trim).reference_valid) (void)Release();
+        return Result(result);
+    }
     service.completed = false;
     service.state = ARM_TRIM_SERVICE_GRIP;
     return Result(ARM_TRIM_OK);
@@ -280,6 +351,7 @@ ArmTrimResult_t ArmTrimService_Cancel(void)
 {
     ArmTrimResult_t result;
     if (!service.configured) return Result(ARM_TRIM_INVALID);
+    service.pose_pending = service.jog_motion = false;
     if (service.fault_latched || service.state == ARM_TRIM_SERVICE_FAULT)
         return Result(ARM_TRIM_FAULT_LATCHED);
     if (service.state == ARM_TRIM_SERVICE_STOPPING) return Result(ARM_TRIM_OK);
@@ -288,7 +360,8 @@ ArmTrimResult_t ArmTrimService_Cancel(void)
         service.state = ARM_TRIM_SERVICE_IDLE;
         return Result(ARM_TRIM_OK);
     }
-    if (service.state == ARM_TRIM_SERVICE_PROFILE || service.state == ARM_TRIM_SERVICE_GRIP) {
+    if (service.state == ARM_TRIM_SERVICE_PROFILE || service.state == ARM_TRIM_SERVICE_FIXED ||
+        service.state == ARM_TRIM_SERVICE_GRIP) {
         StartStops(service.state == ARM_TRIM_SERVICE_GRIP ? 8U : 7U, ARM_TRIM_OK);
         return Result(ARM_TRIM_OK);
     }
@@ -304,6 +377,7 @@ ArmTrimResult_t ArmTrimService_End(void)
 {
     ArmTrimResult_t result;
     if (!service.configured) return Result(ARM_TRIM_INVALID);
+    service.pose_pending = false;
     if (service.state == ARM_TRIM_SERVICE_FAULT || service.fault_latched) {
         service.ending = true;
         /* A latched fault may still be running the required stop sequence. */
@@ -345,7 +419,7 @@ static void ProcessWait(void)
 {
     ServoTransferStatus_t transfer;
     uint32_t now = Now(&service);
-    uint32_t wait = service.state == ARM_TRIM_SERVICE_PROFILE ?
+    uint32_t wait = service.state != ARM_TRIM_SERVICE_GRIP ?
         (uint32_t)service.config.profile_move_ms + service.config.profile_guard_ms :
         (uint32_t)service.config.grip_move_ms + service.config.grip_guard_ms;
     if (!service.completed) {
@@ -368,16 +442,24 @@ static void ProcessWait(void)
         }
     }
     if (!service.completed || (uint32_t)(now - service.completed_tick) < wait) return;
-    if (service.state == ARM_TRIM_SERVICE_GRIP) service.state = ARM_TRIM_SERVICE_REFERENCE;
+    if (service.state == ARM_TRIM_SERVICE_GRIP) {
+        if (ArmTrim_GetStatus(&service.trim).reference_valid)
+            service.state = ARM_TRIM_SERVICE_REFERENCE;
+        else {
+            service.state = ARM_TRIM_SERVICE_IDLE;
+            service.ending = !Release();
+        }
+    }
     else if (service.synchronize_profile) {
         ArmTrimResult_t result = ArmTrim_Synchronize(&service.trim,
-            service.config.references[service.profile]);
+            service.fixed_positions);
         if (result == ARM_TRIM_OK) service.state = ARM_TRIM_SERVICE_REFERENCE;
         else {
+            bool fixed = service.state == ARM_TRIM_SERVICE_FIXED;
             Invalidate();
             service.last_request = result;
-            service.fault_latched = true;
-            service.state = ARM_TRIM_SERVICE_FAULT;
+            service.fault_latched = !fixed;
+            service.state = fixed ? ARM_TRIM_SERVICE_IDLE : ARM_TRIM_SERVICE_FAULT;
             (void)Release();
         }
     } else {
@@ -434,15 +516,24 @@ void ArmTrimService_Process(void)
     ArmTrimStatus_t core;
     if (!service.configured) return;
     Servo_Process();
-    if (service.state == ARM_TRIM_SERVICE_PROFILE || service.state == ARM_TRIM_SERVICE_GRIP)
+    if (service.state == ARM_TRIM_SERVICE_PROFILE || service.state == ARM_TRIM_SERVICE_FIXED ||
+        service.state == ARM_TRIM_SERVICE_GRIP)
         ProcessWait();
     else if (service.state == ARM_TRIM_SERVICE_STOPPING) ProcessStops();
     else if (service.state == ARM_TRIM_SERVICE_MOTION) {
         ArmTrim_Process(&service.trim);
         core = ArmTrim_GetStatus(&service.trim);
-        if (core.state == ARM_TRIM_COMPLETE_ESTIMATED || core.state == ARM_TRIM_READY)
+        if (core.state == ARM_TRIM_COMPLETE_ESTIMATED || core.state == ARM_TRIM_READY) {
             service.state = ARM_TRIM_SERVICE_REFERENCE;
+            service.jog_motion = false;
+            if (service.pose_pending) {
+                service.pose_pending = false;
+                (void)DispatchPose(service.pending_positions, service.pending_profile,
+                                   service.pending_synchronize, service.pending_fixed);
+            }
+        }
         else if (core.state == ARM_TRIM_CANCELLED || core.state == ARM_TRIM_FAULT) {
+            service.pose_pending = service.jog_motion = false;
             service.stop_failed = core.stop_failed;
             service.fault_latched = core.state == ARM_TRIM_FAULT;
             if (core.error != ARM_TRIM_OK) service.last_request = core.error;
@@ -467,6 +558,7 @@ ArmTrimServiceStatus_t ArmTrimService_GetStatus(void)
     status.owns_motion = service.owns;
     status.busy = Busy();
     status.stop_failed = service.stop_failed;
+    status.pose_pending = service.pose_pending;
     status.core = ArmTrim_GetStatus(&service.trim);
     if (service.owns) status.transfer = Servo_GetTransferStatus(&service);
     return status;

@@ -21,6 +21,8 @@ static uint16_t last_grip;
 static float last_move;
 static bool last_synchronize;
 static ArmTrimServiceProfile_t last_profile;
+static ServoCode last_preset;
+static unsigned presets;
 static ArmTrimResult_t start_result;
 static BluetoothTextHandler_t handler;
 static char replies[4096];
@@ -40,6 +42,8 @@ ArmTrimResult_t ArmTrimService_Init(const ArmTrimServiceConfig_t *config,
 { CHECK(config->profile_move_ms != 0U && clock(user) == now); return ARM_TRIM_OK; }
 ArmTrimResult_t ArmTrimService_ReadyProfile(ArmTrimServiceProfile_t profile, bool synchronize)
 { ++readies; last_profile = profile; last_synchronize = synchronize; return ARM_TRIM_OK; }
+ArmTrimResult_t ArmTrimService_RunPreset(ServoCode preset)
+{ ++presets; last_preset = preset; return ARM_TRIM_OK; }
 ArmTrimResult_t ArmTrimService_Begin(const uint16_t positions[3], bool parked_stable)
 { CHECK(positions != NULL && parked_stable); ++begins; return ARM_TRIM_OK; }
 ArmTrimResult_t ArmTrimService_MoveRelativeX(float distance)
@@ -70,6 +74,7 @@ static void Reset(void)
 {
     memset(&service, 0, sizeof(service)); replies[0] = '\0';
     starts = accepted_jogs = releases = cancels = readies = grips = moves = begins = ends = clears = processes = 0U;
+    presets = 0U;
     car_state = CAR_READY; motor_idle = 1U; motor_fault = 0U; start_result = ARM_TRIM_OK;
     now = 1000U; ArmTrimInput_Init(); CHECK(handler == ArmTrimInput_HandleLine);
 }
@@ -187,6 +192,19 @@ int main(void)
     now += ARM_TRIM_INPUT_LEASE_MS + 1U; ArmTrimInput_Process(); CHECK(starts == 0U);
     Line("@ARM TRIM JOG 1"); CHECK(starts == 0U);
     Line("@ARM TRIM RELEASE"); Line("@ARM TRIM JOG 1"); CHECK(accepted_jogs == 1U);
+    Reset(); ArmTrimInput_SubmitCombined(0U, -1, Servo_RST, 0U, 1U, now);
+    ArmTrimInput_Process(); CHECK(presets == 1U && last_preset == Servo_RST);
+    Reset(); Packet(ARM_TRIM_BUTTON_JOG, -1);
+    ArmTrimInput_SubmitCombined(ARM_TRIM_BUTTON_JOG, -1, Servo_RST, 0U, 1U, now);
+    ArmTrimInput_Process(); CHECK(presets == 1U);
+    Packet(ARM_TRIM_BUTTON_JOG, -1); CHECK(starts == 1U);
+    Reset(); ArmTrimInput_SubmitCombined(ARM_TRIM_BUTTON_CLOSE, 0, Servo_RST, 0U, 1U, now);
+    ArmTrimInput_Process(); CHECK(presets == 0U && grips == 0U);
+    Reset(); ArmTrimInput_SubmitCombined(ARM_TRIM_BUTTON_STOP, 0, Servo_RST, 0U, 1U, now);
+    service.owns_motion = true; ArmTrimInput_Process(); CHECK(presets == 0U && cancels == 1U);
+    Reset(); ArmTrimInput_SubmitCombined(0U, 0, ServoCode_NONE, 700U, 1U, now);
+    ArmTrimInput_Process(); CHECK(grips == 1U && last_grip == 700U);
+    Line("@BENCH POSE RST"); CHECK(presets == 1U);
     printf("PASS trim frontend: %u checks; late-loop dispatch, held presses, conflicts, stop, lease, parking and text\n", checks);
     return 0;
 }

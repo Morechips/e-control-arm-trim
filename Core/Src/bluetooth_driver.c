@@ -39,6 +39,7 @@ static const ButtonPose button_poses[] = {
 static uint32_t servo_last_sequence, servo_last_servo_one_sequence, servo_last_rx_tick;
 static uint16_t servo_previous_buttons, servo_previous_gap_pwm;
 static uint8_t servo_previous_aim, servo_gap_initialized;
+static uint8_t servo_previous_pid, servo_previous_reference;
 static uint32_t servo_aim_sequence, servo_transmit_count;
 static unsigned servo_last_transmit_result;
 static UartRx_t rx;
@@ -156,9 +157,17 @@ static uint8_t IsArmCommand(int16_t value)
 static uint8_t Phone20PrefixValid(const uint8_t *p)
 {
     unsigned i;
-    if ((p[2] & 0xF0U) != 0U || !AxisValid(bt_read_short(&p[3])) ||
+    if (
+#if !ARM_TRIM_ENABLE
+        (p[2] & 0xF0U) != 0U ||
+#endif
+        !AxisValid(bt_read_short(&p[3])) ||
         !AxisValid(bt_read_short(&p[27])) ||
-        !ArmDirectionValid(bt_read_short(&p[29])) ||
+        !(ArmDirectionValid(bt_read_short(&p[29]))
+#if ARM_TRIM_ENABLE
+          || (bt_read_short(&p[29]) >= 0 && bt_read_short(&p[29]) <= 11)
+#endif
+          ) ||
         !AxisValid(bt_read_short(&p[31])) ||
         !AxisValid(bt_read_short(&p[33]))) return 0U;
     for (i = 1U; i <= 11U; ++i)
@@ -180,12 +189,26 @@ static void DecodePhone20(BluetoothControlFrame *c, const uint8_t *p)
     c->Cam_T = bt_read_short(&p[19]);
     c->Shot = (int16_t)(bt_read_short(&p[21]) || (p[2] & 0x02U));
     c->left_90 = bt_read_short(&p[23]);
-    /* servo_mode and the three arm fields have no runtime action. */
+    /* The original byte offsets are preserved for existing phone profiles. */
     c->joy_x = bt_read_short(&p[27]);
     c->aim = (uint8_t)((p[2] & 0x04U) != 0U);
     c->servo_buttons = (uint16_t)((p[1] | ((uint16_t)p[2] << 8)) &
-        ~(BT_CONTROL_BOOL_SHOT_BIT | BT_CONTROL_BOOL_AIM_BIT));
+        (BT_SERVO_BUTTON_TB_B | BT_SERVO_BUTTON_TB_M | BT_SERVO_BUTTON_TB_G |
+         BT_SERVO_BUTTON_BD_U | BT_SERVO_BUTTON_BD_D | BT_SERVO_BUTTON_TH_C |
+         BT_SERVO_BUTTON_TH_G | BT_SERVO_BUTTON_TH_U | BT_SERVO_BUTTON_RST |
+         BT_SERVO_BUTTON_TH_L));
     c->gap_pwm = (uint16_t)bt_read_uint32(&p[35]);
+#if ARM_TRIM_ENABLE
+    if (p[2] & 0x10U) c->trim_buttons |= ARM_TRIM_BUTTON_JOG;
+    if (p[2] & 0x20U) c->trim_buttons |= ARM_TRIM_BUTTON_CLOSE;
+    if (p[2] & 0x40U) c->trim_buttons |= ARM_TRIM_BUTTON_OPEN;
+    if (p[2] & 0x80U) c->trim_buttons |= ARM_TRIM_BUTTON_STOP;
+    if (bt_read_short(&p[25]) != 0) c->trim_buttons |= ARM_TRIM_BUTTON_STATUS;
+    c->trim_direction = bt_read_short(&p[31]);
+    if (bt_read_short(&p[29]) >= 1 && bt_read_short(&p[29]) <= 11)
+        c->pid_command = (uint8_t)bt_read_short(&p[29]);
+    c->reference_pressed = (uint8_t)(bt_read_short(&p[33]) == 1);
+#endif
 }
 
 static void ArmButton(int16_t value, uint32_t tick)
@@ -252,6 +275,9 @@ static uint8_t PayloadValid(const uint8_t *p, uint8_t length)
 static void DecodeControl(BluetoothControlFrame *c, const uint8_t *p,
                           uint8_t length)
 {
+    /* A shorter legacy frame must release fields absent from its schema,
+     * especially the unified page's held jog and edge commands. */
+    memset(c, 0, sizeof(*c));
     c->joy_x = bt_read_short(&p[1]);
     c->joy_y = bt_read_short(&p[3]);
     c->forward = bt_read_short(&p[5]);
@@ -417,6 +443,7 @@ void Bluetooth_Init(void)
     sequence = 0U;
     servo_last_sequence = servo_last_servo_one_sequence = servo_last_rx_tick = 0U;
     servo_previous_buttons = servo_previous_gap_pwm = 0U;
+    servo_previous_pid = servo_previous_reference = 0U;
     servo_previous_aim = servo_gap_initialized = 0U;
     servo_aim_sequence = servo_transmit_count = 0U;
     servo_last_transmit_result = 255U;
@@ -558,7 +585,10 @@ void Bluetooth_Process(void)
              bt_read_short(&frame[1]) > JOY_RANGE ||
              bt_read_short(&frame[3]) < -JOY_RANGE ||
              bt_read_short(&frame[3]) > JOY_RANGE) &&
-            ((frame[2] & 0xF0U) != 0U ||
+            (
+#if !ARM_TRIM_ENABLE
+             (frame[2] & 0xF0U) != 0U ||
+#endif
              bt_read_short(&frame[3]) < -JOY_RANGE ||
              bt_read_short(&frame[3]) > JOY_RANGE)) goto invalid_frame;
         if (used == BT_CONTROL_FRAME_PHONE20_SIZE) {
@@ -789,6 +819,7 @@ void Bluetooth_DispatchServoActions(uint8_t physical_aim_press)
     uint32_t one_sequence = Bluetooth_GetServoOneSequence();
     uint8_t connected = Bluetooth_IsConnected();
     uint8_t physical = physical_aim_press;
+    uint8_t fresh = 0U;
     uint8_t reference = (uint8_t)(connected && one_sequence != servo_last_servo_one_sequence);
     uint8_t aim = 0U, gap = 0U;
     uint16_t buttons = 0U;
@@ -802,10 +833,12 @@ void Bluetooth_DispatchServoActions(uint8_t physical_aim_press)
     requests = physical + reference;
     servo_last_servo_one_sequence = one_sequence;
     if (!connected) {
+        servo_previous_pid = servo_previous_reference = 0U;
         servo_previous_buttons = servo_previous_gap_pwm = 0U;
         servo_previous_aim = servo_gap_initialized = 0U;
         servo_last_sequence = sequence;
     } else if (sequence != servo_last_sequence) {
+        fresh = 1U;
         uint32_t rx_tick = Bluetooth_GetLastRxTick();
         /* Also detect a reconnect when a fresh frame arrived before this
          * module had a chance to observe the link timeout. */
@@ -823,6 +856,16 @@ void Bluetooth_DispatchServoActions(uint8_t physical_aim_press)
         servo_previous_aim = c->aim;
         servo_previous_gap_pwm = c->gap_pwm;
         servo_gap_initialized = 1U;
+#if ARM_TRIM_ENABLE
+        if (c->pid_command != 0U && c->pid_command != servo_previous_pid)
+            PID_Tuner_HandleCommand(c->pid_command);
+        if (c->reference_pressed && !servo_previous_reference) {
+            ++requests;
+            reference = 1U;
+        }
+        servo_previous_pid = c->pid_command;
+        servo_previous_reference = c->reference_pressed;
+#endif
         if (aim) ++servo_aim_sequence;
     }
 
@@ -846,6 +889,18 @@ void Bluetooth_DispatchServoActions(uint8_t physical_aim_press)
             name = "REFERENCE";
         }
     }
+#if ARM_TRIM_ENABLE
+    if (fresh || physical || reference) {
+        ArmTrimInput_SubmitCombined(connected ? c->trim_buttons : 0U,
+            connected ? c->trim_direction : 0, pose,
+            gap ? c->gap_pwm : 0U, requests, fresh ? servo_last_rx_tick : HAL_GetTick());
+        if (requests != 0U) ++servo_transmit_count;
+    }
+    BoardInputs_TraceServo(servo_transmit_count, servo_last_transmit_result);
+    return;
+#else
+    (void)fresh;
+#endif
     if (pose == ServoCode_NONE && !gap) {
         BoardInputs_TraceServo(servo_transmit_count, servo_last_transmit_result);
         return;

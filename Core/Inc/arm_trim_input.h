@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "servo.h"
 
 /* Selectable project integration. Pure planner consumers need no input layer. */
 #ifndef ARM_TRIM_ENABLE
@@ -21,6 +22,12 @@
 void ArmTrimInput_Init(void);
 /* Foreground reception copies one request; actions run in the late loop. */
 void ArmTrimInput_Submit(uint8_t buttons, int16_t direction, uint32_t arrival_tick);
+/* The unified car packet and legacy pose buttons enter the same foreground
+ * consumer. requests counts preset/GAP edges, so conflicting presses are
+ * consumed once rather than replayed after a busy motion. */
+void ArmTrimInput_SubmitCombined(uint8_t buttons, int16_t direction,
+                                 ServoCode preset, uint16_t gap_pwm,
+                                 unsigned requests, uint32_t arrival_tick);
 void ArmTrimInput_HandleLine(const char *line, uint32_t arrival_tick);
 /* ISR-safe latch; no parsing, logging or servo I/O. */
 void ArmTrimInput_Invalidate(void);

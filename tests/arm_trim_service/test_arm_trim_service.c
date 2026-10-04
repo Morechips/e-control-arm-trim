@@ -22,6 +22,14 @@ static ServoTransferStatus_t transfer;
 static uint32_t tick, active_started;
 static bool active, queued, active_tracked, automatic;
 static ServoStatus_t next_submit;
+/* The real full preset table is exercised by test_arm_trim_pipeline. */
+const ServoCommand_t codes[ServoCode_MAX][SERVO_PER_CODE_COUNT] = {
+    [Servo_RST] = {{0U, 1524U, 2000U}, {1U, 1163U, 2000U}, {2U, 1693U, 2000U}},
+    [Servo_AIM] = {{0U, 1058U, 2000U}, {1U, 821U, 2000U}, {2U, 554U, 2000U}}
+};
+const uint8_t servo_code_counts[ServoCode_MAX] = {
+    [Servo_RST] = 4U, [Servo_AIM] = 4U
+};
 
 static uint32_t Now(void *user) { CHECK(user == &tick); return tick; }
 ServoStatus_t Servo_Acquire(const void *owner)
@@ -178,7 +186,10 @@ static void TestProfileAndGrip(void)
     unsigned i;
     Init();
     CHECK(ArmTrimService_MoveRelativeX(1.0f) == ARM_TRIM_REFERENCE_REQUIRED);
-    CHECK(ArmTrimService_Grip(500U) == ARM_TRIM_REFERENCE_REQUIRED);
+    CHECK(ArmTrimService_Grip(500U) == ARM_TRIM_OK);
+    Finish();
+    CHECK(!ArmTrimService_GetStatus().core.reference_valid && !ArmTrimService_OwnsMotion());
+    Init();
     CHECK(ArmTrimService_ReadyProfile(ARM_TRIM_PROFILE_BALL, true) == ARM_TRIM_OK);
     CHECK(record_count == 1U && records[0].count == 3U);
     for (i = 0U; i < 3U; ++i) CHECK(records[0].commands[i].id == i);
@@ -399,6 +410,61 @@ static void TestConfiguredGripperLimits(void)
     config.grip_max_pwm = 1900U;
     CHECK(ArmTrimService_Init(&config, Now, &tick) == ARM_TRIM_INVALID);
 }
+static void TestPoseHandoff(void)
+{
+    unsigned before;
+    ArmTrimServiceConfig_t stricter;
+    Init();
+    /* A migrated installation may still configure stricter bounds. Requests
+     * outside those bounds must remain atomic even during a held jog. */
+    stricter = Config();
+    stricter.core.calibration[1].min_position = 900U;
+    CHECK(ArmTrimService_Init(&stricter, Now, &tick) == ARM_TRIM_OK);
+    BeginBall();
+    CHECK(ArmTrimService_StartJog(-1) == ARM_TRIM_OK);
+    automatic = true;
+    for (unsigned i = 0U; i < 30U; ++i) Step(5U);
+    before = record_count;
+    CHECK(ArmTrimService_RunPreset(Servo_AIM) == ARM_TRIM_OUT_OF_RANGE);
+    CHECK(record_count == before && ArmTrimService_GetStatus().core.jogging);
+    CHECK(ArmTrimService_RunPreset(Servo_RST) == ARM_TRIM_OK);
+    CHECK(ArmTrimService_GetStatus().pose_pending && record_count == before);
+    CHECK(ArmTrimService_ReadyProfile(ARM_TRIM_PROFILE_BUCKET, true) == ARM_TRIM_BUSY);
+    Finish();
+    CHECK(!ArmTrimService_GetStatus().pose_pending);
+    CHECK(ArmTrimService_GetStatus().state != ARM_TRIM_SERVICE_FAULT);
+    CHECK(records[record_count - 1U].count == 3U);
+    CHECK(records[record_count - 1U].commands[0].pwm == 1524U);
+    for (unsigned i = 0U; i < record_count; ++i)
+        for (unsigned j = 0U; j < records[i].count; ++j)
+            CHECK(records[i].commands[j].id != 3U);
+    CHECK(ArmTrimService_End() == ARM_TRIM_OK); Finish();
+
+    Init(); BeginBall();
+    CHECK(ArmTrimService_StartJog(-1) == ARM_TRIM_OK);
+    CHECK(ArmTrimService_ReadyProfile(ARM_TRIM_PROFILE_BUCKET, true) == ARM_TRIM_OK);
+    CHECK(ArmTrimService_Cancel() == ARM_TRIM_OK);
+    CHECK(!ArmTrimService_GetStatus().pose_pending);
+    CHECK(ArmTrimService_RunPreset(Servo_RST) == ARM_TRIM_BUSY);
+    Finish();
+    for (unsigned i = 0U; i < record_count; ++i) CHECK(records[i].stop);
+    Init(); BeginBall();
+    CHECK(ArmTrimService_MoveRelativeX(-2.0f) == ARM_TRIM_OK);
+    CHECK(ArmTrimService_RunPreset(Servo_RST) == ARM_TRIM_BUSY);
+    CHECK(ArmTrimService_Cancel() == ARM_TRIM_OK); Finish();
+    Init(); BeginBall();
+    CHECK(ArmTrimService_StartJog(-1) == ARM_TRIM_OK);
+    ArmTrimService_Process(); CHECK(active);
+    CHECK(ArmTrimService_RunPreset(Servo_RST) == ARM_TRIM_OK);
+    Complete(false);
+    Finish();
+    CHECK(ArmTrimService_GetStatus().state == ARM_TRIM_SERVICE_FAULT);
+    CHECK(!ArmTrimService_GetStatus().pose_pending);
+    for (unsigned i = 0U; i < record_count; ++i)
+        CHECK(records[i].stop || records[i].commands[0].time_ms != 2000U);
+    CHECK(ArmTrimService_ClearFault() == ARM_TRIM_OK);
+}
+
 int main(void)
 {
     TestProfileAndGrip();
@@ -409,6 +475,7 @@ int main(void)
     TestMotionFailureAndStopFailure();
     TestCompletedDeadlineValidation();
     TestConfiguredGripperLimits();
+    TestPoseHandoff();
     printf("Arm trim service tests: %u checks passed\n", checks);
     return 0;
 }

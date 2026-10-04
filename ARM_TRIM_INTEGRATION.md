@@ -1,5 +1,7 @@
 # 机械臂模块接入说明（v4.6 / team-main，2026-10-03）
 
+> 本文保留v4.6交付记录。当前v4.7服务/接口/烧录见 [UNIFIED_MODULE_INTEGRATION.md](UNIFIED_MODULE_INTEGRATION.md)，手机见 [UNIFIED_CONTROL_GUIDE.md](UNIFIED_CONTROL_GUIDE.md)。旧版先END才能切入口的流程已由统一服务替代。
+
 本目录 `D:\工科大\e-control-arm-trim-latest-20261003` 是新拉取的队友 `gpnu-in-jnds/e-control` main，基线 `e7404c592df92c7c5e7a9d09562e302ebf52e2b3`。在此基线上导入已有模块化机械臂、服务与输入适配、安装配置向导，并重新运行回归和完整构建。旧工作目录和已核对固件不改，本次未推送或操作硬件。
 
 可烧录产物在 `firmware_direct`，默认启用机械臂模块。完整蓝牙配置见 [BLUETOOTH_CONTROLLER_GUIDE.md](BLUETOOTH_CONTROLLER_GUIDE.md)，精确基线、改动范围与本次验证见 [LATEST_INTEGRATION_REPORT.md](LATEST_INTEGRATION_REPORT.md)。

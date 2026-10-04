@@ -19,6 +19,9 @@ static bool configured, packet_pending, line_pending, jog_down, jog_active;
 static volatile bool invalidated;
 static uint8_t packet_buttons, previous_buttons;
 static int16_t packet_direction;
+static ServoCode packet_preset;
+static uint16_t packet_gap;
+static unsigned packet_requests;
 static int jog_direction;
 static uint32_t packet_tick, line_tick, jog_tick;
 static char pending_line[80];
@@ -115,10 +118,10 @@ static void Show(void)
     ArmTrimServiceStatus_t s = ArmTrimService_GetStatus();
     unsigned profile = (unsigned)s.profile;
     if (profile > ARM_TRIM_PROFILE_COUNT) profile = ARM_TRIM_PROFILE_COUNT;
-    Reply("TRIM v4.6 PROFILE=%s OWNER=%u STATE=%u REF=%u ERR=%u REQUEST_ERR=%u STOP_FAIL=%u\r\n",
+    Reply("TRIM v4.7 PROFILE=%s OWNER=%u STATE=%u REF=%u ERR=%u REQUEST_ERR=%u STOP_FAIL=%u PENDING=%u\r\n",
           profile_names[profile], (unsigned)s.owns_motion, (unsigned)s.state,
           (unsigned)s.core.reference_valid, (unsigned)s.core.error,
-          (unsigned)s.last_request, (unsigned)s.stop_failed);
+          (unsigned)s.last_request, (unsigned)s.stop_failed, (unsigned)s.pose_pending);
     Reply("TRIM MODEL_MM=%d,%d ENABLED_MM=%d,%d OFFSET_X10=%d TARGET_X10=%d\r\n",
           (int)s.core.model_min_mm, (int)s.core.model_max_mm,
           (int)s.core.enabled_min_mm, (int)s.core.enabled_max_mm,
@@ -133,9 +136,22 @@ static void Show(void)
 static void Ready(ArmTrimServiceProfile_t profile, bool synchronize)
 {
     if (profile == ARM_TRIM_PROFILE_NONE) { Reply("TRIM ERR PROFILE\r\n"); return; }
-    if (CanStart())
+    if (CanStart()) {
+        ArmTrimResult_t result = ArmTrimService_ReadyProfile(profile, synchronize);
+        if (result == ARM_TRIM_OK) jog_active = false;
         Reply("TRIM READY RESULT=%u PROFILE=%s ONLY_000_001_002\r\n",
-              (unsigned)ArmTrimService_ReadyProfile(profile, synchronize), profile_names[profile]);
+              (unsigned)result, profile_names[profile]);
+    }
+}
+
+static void Preset(ServoCode preset)
+{
+    if (CanStart()) {
+        ArmTrimResult_t result = ArmTrimService_RunPreset(preset);
+        if (result == ARM_TRIM_OK) jog_active = false;
+        Reply("TRIM POSE RESULT=%u CODE=%u ONLY_000_001_002\r\n",
+              (unsigned)result, (unsigned)preset);
+    }
 }
 
 static void Grip(uint16_t pwm)
@@ -160,15 +176,28 @@ void ArmTrimInput_Init(void)
     configured = ArmTrimService_Init(&config, Now, NULL) == ARM_TRIM_OK;
     packet_pending = line_pending = invalidated = jog_down = jog_active = false;
     previous_buttons = 0U;
+    packet_preset = ServoCode_NONE;
+    packet_gap = 0U;
+    packet_requests = 0U;
     reported_state = ARM_TRIM_SERVICE_IDLE;
     Bluetooth_SetTextHandler(ArmTrimInput_HandleLine);
-    Debug_Log("[TRIM] v4.6 modular Servo integration; no startup arm motion\r\n");
+    Debug_Log("[TRIM] v4.7 unified pose/grip/trim service; no startup arm motion\r\n");
 }
 
 void ArmTrimInput_Submit(uint8_t buttons, int16_t direction, uint32_t arrival_tick)
 {
+    ArmTrimInput_SubmitCombined(buttons, direction, ServoCode_NONE, 0U, 0U, arrival_tick);
+}
+
+void ArmTrimInput_SubmitCombined(uint8_t buttons, int16_t direction,
+                                 ServoCode preset, uint16_t gap_pwm,
+                                 unsigned requests, uint32_t arrival_tick)
+{
     packet_buttons = buttons;
     packet_direction = direction;
+    packet_preset = preset;
+    packet_gap = gap_pwm;
+    packet_requests = requests;
     packet_tick = arrival_tick;
     packet_pending = true;
 }
@@ -191,6 +220,11 @@ static void ProcessPacket(void)
 {
     uint8_t buttons = packet_buttons, rising = (uint8_t)(buttons & (uint8_t)~previous_buttons);
     uint8_t action = (uint8_t)(buttons & (uint8_t)~ARM_TRIM_BUTTON_STATUS);
+    uint8_t fixed = (uint8_t)(action & (ARM_TRIM_BUTTON_BALL | ARM_TRIM_BUTTON_HOSTAGE |
+                                       ARM_TRIM_BUTTON_BUCKET));
+    bool switch_pose = jog_active && (fixed != 0U ||
+        (packet_requests == 1U && packet_preset != ServoCode_NONE));
+    unsigned requests = packet_requests;
     int direction = packet_direction > 0 ? 1 : packet_direction < 0 ? -1 : 0;
     previous_buttons = buttons;
     if ((buttons & ARM_TRIM_BUTTON_STOP) != 0U) {
@@ -200,20 +234,31 @@ static void ProcessPacket(void)
     }
     if ((buttons & ARM_TRIM_BUTTON_JOG) == 0U) Release();
     if ((rising & ARM_TRIM_BUTTON_STATUS) != 0U) Show();
-    if ((action & (uint8_t)(action - 1U)) != 0U) {
+    if (switch_pose) action = (uint8_t)(action & (uint8_t)~ARM_TRIM_BUTTON_JOG);
+    for (uint8_t bits = action; bits != 0U; bits = (uint8_t)(bits & (uint8_t)(bits - 1U)))
+        ++requests;
+    if (requests > 1U) {
         if (jog_active) { (void)ArmTrimService_ReleaseJog(); jog_active = false; }
         /* Consume a rejected held press; it cannot retry after the conflict. */
         if ((buttons & ARM_TRIM_BUTTON_JOG) != 0U) jog_down = true;
-        if (rising != 0U) Reply("TRIM ERR ONE_ACTION_BUTTON_AT_A_TIME\r\n");
+        if (rising != 0U || packet_requests != 0U) Reply("TRIM ERR ONE_ACTION_BUTTON_AT_A_TIME\r\n");
         return;
     }
-    if (packet_direction < -150 || packet_direction > 150) {
+    if ((buttons & ARM_TRIM_BUTTON_JOG) != 0U &&
+        (packet_direction < -150 || packet_direction > 150)) {
         if (jog_active) { (void)ArmTrimService_ReleaseJog(); jog_active = false; }
         if ((buttons & ARM_TRIM_BUTTON_JOG) != 0U) jog_down = true;
         if (rising != 0U) Reply("TRIM ERR YDNUM_RANGE\r\n");
         return;
     }
-    if ((buttons & ARM_TRIM_BUTTON_JOG) != 0U) {
+    if (packet_requests != 0U) {
+        if (packet_preset != ServoCode_NONE) Preset(packet_preset);
+        else if (packet_gap != 0U) Grip(packet_gap);
+    } else if (switch_pose) {
+        if ((rising & ARM_TRIM_BUTTON_BALL) != 0U) Ready(ARM_TRIM_PROFILE_BALL, true);
+        else if ((rising & ARM_TRIM_BUTTON_HOSTAGE) != 0U) Ready(ARM_TRIM_PROFILE_HOSTAGE, true);
+        else if ((rising & ARM_TRIM_BUTTON_BUCKET) != 0U) Ready(ARM_TRIM_PROFILE_BUCKET, true);
+    } else if ((buttons & ARM_TRIM_BUTTON_JOG) != 0U) {
         Jog(direction, packet_tick, (rising & ARM_TRIM_BUTTON_JOG) != 0U);
     } else if ((rising & ARM_TRIM_BUTTON_BALL) != 0U) Ready(ARM_TRIM_PROFILE_BALL, true);
     else if ((rising & ARM_TRIM_BUTTON_HOSTAGE) != 0U) Ready(ARM_TRIM_PROFILE_HOSTAGE, true);
@@ -251,6 +296,17 @@ static void ProcessLine(void)
     } else if (count == 2U) {
         if (bench && (strcmp(words[0], "READY") == 0 || strcmp(words[0], "PREP") == 0))
             Ready(Profile(words[1]), strcmp(words[0], "READY") == 0);
+        else if (bench && strcmp(words[0], "POSE") == 0) {
+            static const char *const names[] = {
+                "TB_B", "TB_M", "TB_G", "BD_U", "BD_D", "TH_U", "TH_C",
+                "TH_G", "TH_L", "REFERENCE", "RST", "AIM", "TH_PRE"
+            };
+            unsigned preset;
+            for (preset = 0U; preset < (unsigned)ServoCode_MAX; ++preset)
+                if (strcmp(words[1], names[preset]) == 0) break;
+            if (preset == (unsigned)ServoCode_MAX) Reply("TRIM ERR POSE\r\n");
+            else Preset((ServoCode)preset);
+        }
         else if (!bench && strcmp(words[0], "BEGIN") == 0) {
             ArmTrimServiceProfile_t profile = Profile(words[1]);
             if (profile == ARM_TRIM_PROFILE_NONE) Reply("TRIM ERR PROFILE\r\n");
